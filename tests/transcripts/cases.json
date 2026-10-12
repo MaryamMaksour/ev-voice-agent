@@ -1,0 +1,739 @@
+[
+ {
+  "id": "01_qualified_full",
+  "lead": {
+   "id": "L001",
+   "name": "Sarah Johnson",
+   "phone": "+1555010000",
+   "project_interest": "Marina Heights"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Sarah?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, this is Sarah."
+   },
+   {
+    "role": "agent",
+    "text": "Great! You enquired about Marina Heights. Are you still interested?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, definitely, I'm still looking."
+   },
+   {
+    "role": "agent",
+    "text": "Wonderful. What budget do you have in mind?"
+   },
+   {
+    "role": "user",
+    "text": "Around eight hundred thousand dollars."
+   },
+   {
+    "role": "agent",
+    "text": "And which area do you prefer?"
+   },
+   {
+    "role": "user",
+    "text": "The Marina area, close to the beach."
+   },
+   {
+    "role": "agent",
+    "text": "What type of property are you looking for?"
+   },
+   {
+    "role": "user",
+    "text": "A two bedroom apartment."
+   },
+   {
+    "role": "agent",
+    "text": "When are you planning to buy?"
+   },
+   {
+    "role": "user",
+    "text": "Within the next two months, hopefully."
+   },
+   {
+    "role": "agent",
+    "text": "Perfect, a consultant will contact you soon. Thank you, Sarah!"
+   },
+   {
+    "role": "user",
+    "text": "Thanks, bye."
+   }
+  ],
+  "expected": {
+   "outcome": "qualified",
+   "lead_update": {
+    "status": "qualified",
+    "budget": 800000,
+    "preferred_area": "Marina",
+    "property_type": "apartment",
+    "timeline": "within 2 months",
+    "interest_level": "hot"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "02_not_interested",
+  "lead": {
+   "id": "L002",
+   "name": "Michael Chen",
+   "phone": "+1555010000",
+   "project_interest": "Palm Gardens Villas"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Michael?"
+   },
+   {
+    "role": "user",
+    "text": "Speaking."
+   },
+   {
+    "role": "agent",
+    "text": "You enquired about Palm Gardens Villas. Are you still interested?"
+   },
+   {
+    "role": "user",
+    "text": "No, sorry, we already bought a house last month."
+   },
+   {
+    "role": "agent",
+    "text": "Congratulations! I'll update our records. Have a great day."
+   },
+   {
+    "role": "user",
+    "text": "Thanks, you too."
+   }
+  ],
+  "expected": {
+   "outcome": "not_interested",
+   "lead_update": {
+    "status": "not_interested"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "03_callback",
+  "lead": {
+   "id": "L003",
+   "name": "Emily Davis",
+   "phone": "+1555010000",
+   "project_interest": "Downtown Lofts"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Emily?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, but I'm driving right now."
+   },
+   {
+    "role": "agent",
+    "text": "No problem. When would be a better time to call?"
+   },
+   {
+    "role": "user",
+    "text": "Can you call me Thursday at 4 pm?"
+   },
+   {
+    "role": "agent",
+    "text": "Sure, I've booked a call for Thursday at 4 pm. Drive safe!"
+   },
+   {
+    "role": "user",
+    "text": "Thanks."
+   }
+  ],
+  "expected": {
+   "outcome": "callback",
+   "lead_update": {
+    "status": "callback"
+   },
+   "callback_requested": true
+  }
+ },
+ {
+  "id": "04_do_not_call",
+  "lead": {
+   "id": "L004",
+   "name": "James Wilson",
+   "phone": "+1555010000",
+   "project_interest": "Marina Heights"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with James?"
+   },
+   {
+    "role": "user",
+    "text": "Yes. Look, please stop calling me, I'm not interested and I don't want any more calls."
+   },
+   {
+    "role": "agent",
+    "text": "I'm sorry for the trouble, James. I've removed you from our call list. Goodbye."
+   }
+  ],
+  "expected": {
+   "outcome": "do_not_call",
+   "lead_update": {
+    "status": "do_not_call"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "05_wrong_number",
+  "lead": {
+   "id": "L005",
+   "name": "Olivia Brown",
+   "phone": "+1555010000",
+   "project_interest": "Lakeside Townhouses"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Olivia?"
+   },
+   {
+    "role": "user",
+    "text": "No, there's no Olivia here. You have the wrong number."
+   },
+   {
+    "role": "agent",
+    "text": "I apologise for the confusion. Have a good day."
+   }
+  ],
+  "expected": {
+   "outcome": "wrong_number",
+   "lead_update": {
+    "status": "wrong_number"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "06_interested_partial",
+  "lead": {
+   "id": "L006",
+   "name": "David Miller",
+   "phone": "+1555010000",
+   "project_interest": "Business Bay Offices"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with David?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, hi."
+   },
+   {
+    "role": "agent",
+    "text": "You enquired about Business Bay Offices. Are you still interested?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, we need a new office for our company."
+   },
+   {
+    "role": "agent",
+    "text": "Great. Do you have a budget in mind?"
+   },
+   {
+    "role": "user",
+    "text": "I need to check with my partner first, I don't know yet."
+   },
+   {
+    "role": "agent",
+    "text": "Understood. When are you hoping to move?"
+   },
+   {
+    "role": "user",
+    "text": "Maybe in six months or so."
+   },
+   {
+    "role": "agent",
+    "text": "Thank you. A consultant will send you options. Have a nice day."
+   }
+  ],
+  "expected": {
+   "outcome": "interested",
+   "lead_update": {
+    "status": "interested",
+    "property_type": "office",
+    "timeline": "in about 6 months",
+    "interest_level": "warm"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "07_qualified_villa_million",
+  "lead": {
+   "id": "L007",
+   "name": "Sophia Garcia",
+   "phone": "+1555010000",
+   "project_interest": "Palm Gardens Villas"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Sophia?"
+   },
+   {
+    "role": "user",
+    "text": "Yes it is."
+   },
+   {
+    "role": "agent",
+    "text": "Are you still interested in Palm Gardens Villas?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, very much."
+   },
+   {
+    "role": "agent",
+    "text": "What's your budget?"
+   },
+   {
+    "role": "user",
+    "text": "Somewhere between one point two and one point five million."
+   },
+   {
+    "role": "agent",
+    "text": "Which area would you prefer?"
+   },
+   {
+    "role": "user",
+    "text": "Palm Gardens itself, or anywhere in the north district."
+   },
+   {
+    "role": "agent",
+    "text": "And the property type?"
+   },
+   {
+    "role": "user",
+    "text": "A villa with a garden, four bedrooms."
+   },
+   {
+    "role": "agent",
+    "text": "When do you plan to buy?"
+   },
+   {
+    "role": "user",
+    "text": "This year, in about eight months."
+   },
+   {
+    "role": "agent",
+    "text": "Thank you Sophia, a consultant will call you."
+   }
+  ],
+  "expected": {
+   "outcome": "qualified",
+   "lead_update": {
+    "status": "qualified",
+    "budget": 1500000,
+    "preferred_area": "Palm Gardens",
+    "property_type": "villa",
+    "timeline": "in about 8 months",
+    "interest_level": "warm"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "08_callback_next_week",
+  "lead": {
+   "id": "L008",
+   "name": "Daniel Martinez",
+   "phone": "+1555010000",
+   "project_interest": "Downtown Lofts"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Daniel?"
+   },
+   {
+    "role": "user",
+    "text": "Yeah."
+   },
+   {
+    "role": "agent",
+    "text": "Are you still interested in Downtown Lofts?"
+   },
+   {
+    "role": "user",
+    "text": "Maybe, but I'm in a meeting. Call me next Monday morning, around ten."
+   },
+   {
+    "role": "agent",
+    "text": "Sure, I'll call you Monday at 10 am. Thanks Daniel."
+   }
+  ],
+  "expected": {
+   "outcome": "callback",
+   "lead_update": {
+    "status": "callback"
+   },
+   "callback_requested": true
+  }
+ },
+ {
+  "id": "09_cold_lead",
+  "lead": {
+   "id": "L009",
+   "name": "Ava Anderson",
+   "phone": "+1555010000",
+   "project_interest": "Lakeside Townhouses"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Ava?"
+   },
+   {
+    "role": "user",
+    "text": "Yes."
+   },
+   {
+    "role": "agent",
+    "text": "Are you still interested in Lakeside Townhouses?"
+   },
+   {
+    "role": "user",
+    "text": "Kind of. I'm just browsing for now, maybe in two years."
+   },
+   {
+    "role": "agent",
+    "text": "What type of property interests you?"
+   },
+   {
+    "role": "user",
+    "text": "A townhouse, I think."
+   },
+   {
+    "role": "agent",
+    "text": "Any budget range?"
+   },
+   {
+    "role": "user",
+    "text": "Probably around four hundred thousand."
+   },
+   {
+    "role": "agent",
+    "text": "Thanks Ava, we'll keep you updated."
+   }
+  ],
+  "expected": {
+   "outcome": "interested",
+   "lead_update": {
+    "status": "interested",
+    "budget": 400000,
+    "property_type": "townhouse",
+    "timeline": "in about 2 years",
+    "interest_level": "cold"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "10_land_qualified",
+  "lead": {
+   "id": "L011",
+   "name": "Isabella Taylor",
+   "phone": "+1555010000",
+   "project_interest": "Hillside Plots"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Isabella?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, hello."
+   },
+   {
+    "role": "agent",
+    "text": "You enquired about Hillside Plots. Still interested?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, I want to build my own home."
+   },
+   {
+    "role": "agent",
+    "text": "What budget are you working with?"
+   },
+   {
+    "role": "user",
+    "text": "Three hundred fifty thousand for the land."
+   },
+   {
+    "role": "agent",
+    "text": "Which area?"
+   },
+   {
+    "role": "user",
+    "text": "The Hillside area is perfect."
+   },
+   {
+    "role": "agent",
+    "text": "And your timeline?"
+   },
+   {
+    "role": "user",
+    "text": "I'm ready to buy now, within a month."
+   },
+   {
+    "role": "agent",
+    "text": "Excellent, a consultant will reach out today."
+   }
+  ],
+  "expected": {
+   "outcome": "qualified",
+   "lead_update": {
+    "status": "qualified",
+    "budget": 350000,
+    "preferred_area": "Hillside",
+    "property_type": "land",
+    "timeline": "within a month",
+    "interest_level": "hot"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "11_no_answer_voicemail",
+  "lead": {
+   "id": "L012",
+   "name": "Ethan Moore",
+   "phone": "+1555010000",
+   "project_interest": "Downtown Lofts"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Ethan?"
+   }
+  ],
+  "expected": {
+   "outcome": "no_conversation",
+   "lead_update": {},
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "12_asks_price_interested",
+  "lead": {
+   "id": "L013",
+   "name": "Mia Jackson",
+   "phone": "+1555010000",
+   "project_interest": "Palm Gardens Villas"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Mia?"
+   },
+   {
+    "role": "user",
+    "text": "Yes. How much are the villas?"
+   },
+   {
+    "role": "agent",
+    "text": "A consultant will share exact prices. Are you still interested?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, if the price is right. My max is nine hundred thousand."
+   },
+   {
+    "role": "agent",
+    "text": "Which area do you prefer?"
+   },
+   {
+    "role": "user",
+    "text": "I don't mind, anywhere quiet."
+   },
+   {
+    "role": "agent",
+    "text": "Thank you Mia, a consultant will follow up with prices."
+   }
+  ],
+  "expected": {
+   "outcome": "interested",
+   "lead_update": {
+    "status": "interested",
+    "budget": 900000,
+    "property_type": "villa"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "13_changed_mind_dnc",
+  "lead": {
+   "id": "L014",
+   "name": "Alexander White",
+   "phone": "+1555010000",
+   "project_interest": "Business Bay Offices"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Alexander?"
+   },
+   {
+    "role": "user",
+    "text": "Yes."
+   },
+   {
+    "role": "agent",
+    "text": "Are you still interested in Business Bay Offices?"
+   },
+   {
+    "role": "user",
+    "text": "No. And please take my number off your list."
+   },
+   {
+    "role": "agent",
+    "text": "Of course, I've removed your number. Sorry to bother you."
+   }
+  ],
+  "expected": {
+   "outcome": "do_not_call",
+   "lead_update": {
+    "status": "do_not_call"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "14_apartment_warm",
+  "lead": {
+   "id": "L015",
+   "name": "Charlotte Harris",
+   "phone": "+1555010000",
+   "project_interest": "Marina Heights"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Charlotte?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, that's me."
+   },
+   {
+    "role": "agent",
+    "text": "Are you still interested in Marina Heights?"
+   },
+   {
+    "role": "user",
+    "text": "Yes, for investment."
+   },
+   {
+    "role": "agent",
+    "text": "What budget?"
+   },
+   {
+    "role": "user",
+    "text": "Up to six hundred thousand dollars."
+   },
+   {
+    "role": "agent",
+    "text": "Preferred area?"
+   },
+   {
+    "role": "user",
+    "text": "Marina or Downtown, either is fine."
+   },
+   {
+    "role": "agent",
+    "text": "Property type?"
+   },
+   {
+    "role": "user",
+    "text": "A one bedroom apartment to rent out."
+   },
+   {
+    "role": "agent",
+    "text": "When would you buy?"
+   },
+   {
+    "role": "user",
+    "text": "Early next year, so in about five months."
+   },
+   {
+    "role": "agent",
+    "text": "Thanks Charlotte, a consultant will be in touch."
+   }
+  ],
+  "expected": {
+   "outcome": "qualified",
+   "lead_update": {
+    "status": "qualified",
+    "budget": 600000,
+    "preferred_area": "Marina",
+    "property_type": "apartment",
+    "timeline": "in about 5 months",
+    "interest_level": "warm"
+   },
+   "callback_requested": false
+  }
+ },
+ {
+  "id": "15_relative_answers",
+  "lead": {
+   "id": "L016",
+   "name": "Benjamin Clark",
+   "phone": "+1555010000",
+   "project_interest": "Lakeside Townhouses"
+  },
+  "transcript": [
+   {
+    "role": "agent",
+    "text": "Hi, this is Alex from Horizon Realty. Am I speaking with Benjamin?"
+   },
+   {
+    "role": "user",
+    "text": "No, this is his wife. He's not home right now."
+   },
+   {
+    "role": "agent",
+    "text": "Thanks. When is a good time to reach him?"
+   },
+   {
+    "role": "user",
+    "text": "Try tomorrow evening after six."
+   },
+   {
+    "role": "agent",
+    "text": "Thank you, I'll call tomorrow after 6 pm."
+   }
+  ],
+  "expected": {
+   "outcome": "callback",
+   "lead_update": {
+    "status": "callback"
+   },
+   "callback_requested": true
+  }
+ }
+]

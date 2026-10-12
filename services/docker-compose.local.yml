@@ -1,0 +1,63 @@
+# Laptop side (Plan A0 with Ollama, or Plan B with models on a RunPod pod).
+#   docker compose -f services/docker-compose.local.yml --env-file .env up -d
+# The agent itself runs on the laptop with `python -m agent.main dev`.
+#
+# Laptop: stt + tts run here on the CPU, the LLM is Ollama installed natively
+#          (best on Windows/macOS: it uses the GPU directly).
+#          No native install? Add `--profile ollama` to run Ollama in Docker instead.
+# RunPod : only livekit + tts here; STT and LLM URLs in .env point at the pod:
+#   docker compose -f services/docker-compose.local.yml up -d livekit tts
+
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.7
+    command: --config /etc/livekit.yaml
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.local.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+
+  stt:
+    build:
+      context: .
+      dockerfile: Dockerfile.stt
+      args:
+        BASE: python:3.11-slim
+    environment:
+      WHISPER_MODEL: ${LOCAL_WHISPER_MODEL:-small.en}
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: int8
+      WHISPER_MAX_PARALLEL: "1"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8001:8001"
+
+  tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.8.2
+    ports:
+      - "8880:8880"
+
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:0.35.1
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_KEEP_ALIVE: "-1"
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    # uncomment on Linux with an NVIDIA GPU + nvidia-container-toolkit
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+
+volumes:
+  hf-cache:
+  ollama:

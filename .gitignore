@@ -1,0 +1,27 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# working data: real leads, call history, transcripts, costs - never commit
+data/leads.local.csv
+data/call_state.json
+data/*.tmp
+logs/
+prices.json
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# demo runtime data
+data/crm.db
+data/calls/
+data/loadtest/
+loadtest/audio/*.wav
+
+# build artifacts
+build/
+*.egg-info/

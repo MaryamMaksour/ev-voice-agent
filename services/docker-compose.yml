@@ -1,0 +1,108 @@
+# EC2 g6e.xlarge (1x L40S 48 GB): the whole stack on one GPU box, LLM on Ollama.
+#   cp .env.example .env   (edit LIVEKIT keys, LLM_MODEL)
+#   docker compose -f services/docker-compose.yml --env-file .env up -d
+# Host networking keeps WebRTC simple and lets services reach each other on localhost.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.7
+    network_mode: host
+    command: --config /etc/livekit.yaml
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+
+  ollama:
+    <<: *gpu
+    image: ollama/ollama:0.35.1
+    network_mode: host      # serves on :11434
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      # parallel requests per loaded model: the knob for concurrent calls.
+      # Each slot reserves its own context, so VRAM grows with this number.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-16}
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
+      OLLAMA_MAX_QUEUE: "512"
+      OLLAMA_KEEP_ALIVE: "-1"           # keep the model loaded between calls
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0        # halves KV-cache memory -> more parallel calls
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # one-shot: download the model (first start only) and load it into the GPU
+  ollama-pull:
+    image: ollama/ollama:0.35.1
+    network_mode: host
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${LLM_MODEL} && ollama run ${LLM_MODEL} --keepalive -1 --think=false 'Say OK' >/dev/null"]
+    depends_on:
+      ollama: {condition: service_healthy}
+    restart: "no"
+
+  stt:
+    <<: *gpu
+    build:
+      context: .
+      dockerfile: Dockerfile.stt
+    network_mode: host
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3-turbo}
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
+      WHISPER_MAX_PARALLEL: ${WHISPER_MAX_PARALLEL:-8}
+      WHISPER_PROMPT: ${WHISPER_PROMPT:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+    restart: unless-stopped
+
+  tts:
+    <<: *gpu
+    image: ghcr.io/remsky/kokoro-fastapi-gpu:v0.8.2
+    network_mode: host      # serves on :8880
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ..
+    network_mode: host
+    env_file: ../.env
+    environment:
+      LIVEKIT_URL: ws://localhost:7880
+      LLM_BASE_URL: http://localhost:11434/v1
+      STT_BASE_URL: http://localhost:8001/v1
+      TTS_BASE_URL: http://localhost:8880/v1
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      ollama-pull: {condition: service_completed_successfully}
+      stt: {condition: service_healthy}
+      tts: {condition: service_started}
+      livekit: {condition: service_started}
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
+  ollama:

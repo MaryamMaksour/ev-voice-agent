@@ -1,0 +1,9 @@
+# Self-hosted LiveKit server for EC2 (single node: no Redis needed).
+# API keys come from the LIVEKIT_KEYS env var set in docker-compose.yml.
+port: 7880
+rtc:
+  tcp_port: 7881
+  udp_port: 7882          # one UDP port for all media -> one firewall rule
+  use_external_ip: true   # advertise the instance's public IP to browsers
+logging:
+  level: info
