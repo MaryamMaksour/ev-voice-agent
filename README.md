@@ -202,7 +202,25 @@ The compose file runs:
 - Kokoro (GPU)
 - the agent
 
-**Test calls from your laptop:**
+**Fastest way to try it: keep using the laptop console, run only the models on AWS.**
+
+Nothing in your `.env` changes. The SSH tunnel makes the AWS models appear on `localhost`, and the security group only needs port 22.
+```bash
+# on the EC2 instance: only the three model services (no LiveKit, no agent)
+docker compose -f services/docker-compose.yml --env-file .env up -d --build ollama ollama-pull stt tts
+docker compose -f services/docker-compose.yml logs -f ollama-pull      # wait until the model is pulled
+
+# on your laptop (PowerShell or terminal): tunnel Ollama, STT and TTS to localhost
+ssh -i your-key.pem -N -L 11434:localhost:11434 -L 8001:localhost:8001 -L 8880:localhost:8880 ubuntu@<EC2-IP>
+
+# on your laptop, in a second terminal: stop local Ollama first so port 11434 is free
+python -m agent.check            # should show the LLM replying in well under a second
+python -m agent.main console     # same as before, now with the models on the GPU
+python -m agent.check --calls    # compare the time per stage with your laptop runs
+```
+Pick the AWS region closest to you that offers g6e. Each reply makes three round trips through the tunnel, so a far region adds noticeable delay.
+
+**Test calls from your laptop (full stack on EC2, browser Playground):**
 - Tunnel the signalling port: `ssh -L 7880:localhost:7880 ubuntu@<EC2-IP>`.
 - In the laptop `.env`, set `LIVEKIT_URL=ws://localhost:7880` with the same key and secret.
 - Run `python -m agent.make_token --lead L001` and use the Playground in Chrome.
