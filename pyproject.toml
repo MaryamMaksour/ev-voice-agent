@@ -8,6 +8,8 @@ dependencies = [
     "pydantic>=2.6",
     "httpx>=0.27",
     "python-dotenv>=1.0",
+    # Windows has no system time-zone database; zoneinfo needs this package there
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
