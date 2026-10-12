@@ -22,8 +22,9 @@ Caller (browser now / 3CX later)
  LiveKit Server ◄──► Agent worker:  Silero VAD → STT → turn detector → LLM (+tools) → TTS
  (self-hosted)                          │ OpenAI API    │ OpenAI API        │ OpenAI API   │ CRM port
                                         ▼               ▼                   ▼              ▼
-                                 faster-whisper      Ollama             Kokoro       SQLite / Zoho
-                                 (large-v3-turbo)  (qwen3:8b / 14b)
+                                 Parakeet (CPU) /    Ollama             Kokoro       SQLite / Zoho
+                                 faster-whisper    (qwen3:8b / 14b)
+                                 (GPU)
         call ends ─► CallEnded event ─► extraction (JSON schema) ─► fill missing fields + summary note ─► CRM
 ```
 
@@ -97,7 +98,7 @@ ls data/calls/                                 # full call record: transcript, C
 
 **Voice mode** (speak into the mic, hear the agent on your speakers). Also needs the speech services:
 ```bash
-docker compose -f services/docker-compose.local.yml --env-file .env up -d stt tts   # whisper + Kokoro on CPU
+docker compose -f services/docker-compose.local.yml --env-file .env up -d --build stt tts   # Parakeet STT + Kokoro TTS on CPU
 python -m agent.main console                   # Ctrl+T switches between voice and text
 python -m agent.main console --list-devices    # if the wrong mic/speaker is used, then --input-device / --output-device
 ```
@@ -106,6 +107,23 @@ python -m agent.main console --list-devices    # if the wrong mic/speaker is use
 ```bash
 python -m agent.check --play     # Ollama, speech-to-text, text-to-speech, and a test sentence on your speakers
 ```
+
+**Speech-to-text on the laptop is NVIDIA Parakeet TDT 0.6B** (via sherpa-onnx). It is more accurate than Whisper on English and transcribes a sentence in ~0.2–0.4 s on a plain CPU. The model (~650 MB) downloads on first start; watch it with `docker compose -f services/docker-compose.local.yml logs -f stt`. To run it without Docker:
+```bash
+pip install -e ".[stt]"
+$env:STT_ENGINE="parakeet"; python -m uvicorn --app-dir services stt_server:app --port 8001   # PowerShell
+STT_ENGINE=parakeet python -m uvicorn --app-dir services stt_server:app --port 8001          # macOS / Linux
+```
+
+**Why is it slow, and where does the time go?** After a few voice calls:
+```bash
+python -m agent.check --calls
+```
+It shows the average seconds per reply for each stage (speech-to-text, LLM, text-to-speech) and which one is slowest. On a 4 GB laptop GPU the LLM is almost always the slow part, because Qwen3-8B (~5 GB) doesn't fit and runs partly on the CPU. Things that help a little:
+- `OLLAMA_CONTEXT_LENGTH=4096`, `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0`, then restart Ollama. This frees GPU memory for more of the model.
+- Close other apps that use the GPU (browser tabs with video, games).
+
+Real-time speed (about 1 s per reply) needs the whole model on a GPU: an 8 GB+ card, a RunPod pod, or EC2.
 
 **Pick which lead the agent calls** with `DEFAULT_LEAD_ID` (the demo has L001…L020):
 ```bash

@@ -64,6 +64,8 @@ services:
       dockerfile: Dockerfile.stt
     network_mode: host
     environment:
+      STT_ENGINE: ${STT_ENGINE:-whisper}
+      PARAKEET_DIR: /root/.cache/huggingface/parakeet
       WHISPER_MODEL: ${WHISPER_MODEL:-large-v3-turbo}
       WHISPER_DEVICE: cuda
       WHISPER_COMPUTE_TYPE: float16

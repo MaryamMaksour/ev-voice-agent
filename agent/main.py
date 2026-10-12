@@ -207,6 +207,8 @@ async def entrypoint(ctx: JobContext) -> None:
             model=settings.stt_model,
             language="en",
             use_realtime=False,
+            # vocabulary hint for Whisper (names are the hardest words); Parakeet ignores it
+            prompt=f"Real estate phone call with {lead.name} about {lead.project_interest or 'property'}.",
         ),
         llm=openai.LLM(
             base_url=settings.llm_base_url,
@@ -228,6 +230,8 @@ async def entrypoint(ctx: JobContext) -> None:
             # the default "adaptive" interruption detector calls LiveKit Cloud;
             # "vad" keeps barge-in detection on this machine
             "interruption": {"mode": "vad"},
+            # start the LLM and TTS while the caller may still be finishing the sentence
+            "preemptive_generation": {"enabled": True, "preemptive_tts": True},
         },
     )
 

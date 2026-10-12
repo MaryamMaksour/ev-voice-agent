@@ -2,6 +2,7 @@
 
     python -m agent.check            # LLM (Ollama), STT, TTS
     python -m agent.check --play     # also play a test sentence on your speakers
+    python -m agent.check --calls    # where the time goes in your recent calls
 """
 
 from __future__ import annotations
@@ -117,12 +118,57 @@ def play(wav_bytes: bytes) -> None:
     print("did you hear 'Hi, this is Alex from Horizon Realty'? If not, check volume / output device.")
 
 
+def latency_report(calls_dir: str, last: int = 5) -> None:
+    """Average time per stage for the most recent calls, and the slowest stage."""
+    import json
+    from pathlib import Path
+
+    files = sorted(Path(calls_dir).glob("*.json"), key=lambda p: p.stat().st_mtime)[-last:]
+    if not files:
+        print(f"no call records in {calls_dir} yet - make a call first")
+        return
+    labels = {
+        "eou": "waiting for you to finish + speech-to-text",
+        "llm_ttft": "LLM first word (Ollama)",
+        "tts_ttfb": "text-to-speech first audio",
+    }
+    print(f"\naverage time per reply, last {len(files)} call(s):")
+    totals: dict[str, list[float]] = {k: [] for k in labels}
+    for f in files:
+        m = json.loads(f.read_text()).get("metrics", {})
+        if not m.get("turns"):
+            continue
+        for k in labels:
+            totals[k].append(m[k]["mean"])
+    if not totals["eou"]:
+        print("no completed turns recorded (text mode has no audio timings)")
+        return
+    avg = {k: sum(v) / len(v) for k, v in totals.items()}
+    for k, label in labels.items():
+        bar = "#" * max(1, int(avg[k] * 10))
+        print(f"  {label:<45} {avg[k]:5.2f}s  {bar}")
+    print(f"  {'total (you stop -> agent starts)':<45} {sum(avg.values()):5.2f}s")
+    slowest = max(avg, key=avg.get)
+    print(f"\nslowest: {labels[slowest]}")
+    if slowest == "llm_ttft":
+        print("  the model is running partly on CPU. Speed it up: a GPU with >= 8 GB (RunPod / EC2),")
+        print("  or set OLLAMA_CONTEXT_LENGTH=4096 and OLLAMA_FLASH_ATTENTION=1, then restart Ollama.")
+    elif slowest == "eou":
+        print("  speech-to-text is slow: use STT_ENGINE=parakeet (fast on CPU).")
+    else:
+        print("  TTS is slow: make sure the Kokoro container is running and not starved of CPU.")
+
+
 def main() -> None:
     load_dotenv()
     p = argparse.ArgumentParser()
     p.add_argument("--play", action="store_true", help="play a test sentence on the speakers")
+    p.add_argument("--calls", action="store_true", help="show where the time goes in recent calls")
     args = p.parse_args()
     s = Settings()
+    if args.calls:
+        latency_report(s.calls_dir)
+        return
     with httpx.Client(timeout=30, trust_env=False) as client:
         llm = check_llm(s, client)
         stt = check_stt(s, client)

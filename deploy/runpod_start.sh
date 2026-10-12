@@ -33,7 +33,7 @@ OLLAMA_MAX_QUEUE=512 OLLAMA_KEEP_ALIVE=-1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CAC
   nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 &
 
 echo "starting faster-whisper ($WHISPER_MODEL) on :8001"
-WHISPER_MODEL="$WHISPER_MODEL" WHISPER_DEVICE=cuda WHISPER_COMPUTE_TYPE=float16 \
+STT_ENGINE=whisper WHISPER_MODEL="$WHISPER_MODEL" WHISPER_DEVICE=cuda WHISPER_COMPUTE_TYPE=float16 \
   nohup python -m uvicorn --app-dir services stt_server:app --host 0.0.0.0 --port 8001 \
   > "$LOG_DIR/stt.log" 2>&1 &
 

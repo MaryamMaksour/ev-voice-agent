@@ -28,10 +28,15 @@ services:
       args:
         BASE: python:3.11-slim
     environment:
+      # Parakeet: accurate English STT that is fast on a plain CPU.
+      # For Whisper instead: STT_ENGINE=whisper, WHISPER_MODEL=small.en, WHISPER_DEVICE=cpu
+      STT_ENGINE: ${LOCAL_STT_ENGINE:-parakeet}
+      PARAKEET_DIR: /root/.cache/huggingface/parakeet
+      PARAKEET_THREADS: ${PARAKEET_THREADS:-4}
       WHISPER_MODEL: ${LOCAL_WHISPER_MODEL:-small.en}
       WHISPER_DEVICE: cpu
       WHISPER_COMPUTE_TYPE: int8
-      WHISPER_MAX_PARALLEL: "1"
+      STT_MAX_PARALLEL: "1"
     volumes:
       - hf-cache:/root/.cache/huggingface
     ports:
