@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -42,7 +43,7 @@ from openai import AsyncOpenAI
 
 from crm import Lead, make_crm
 
-from .config import Settings, no_think_body
+from .config import Settings, no_think_body, session_conn_options, warm_up_llm
 from .events import CallEnded, InProcessBus, PostCallProcessor
 from .metrics import CallMetrics
 from .prompts import build_system_prompt, greeting_instructions
@@ -177,6 +178,8 @@ server = AgentServer(
 
 def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load()
+    # load the LLM into memory in the background (can take 10-30 s on a laptop)
+    threading.Thread(target=warm_up_llm, args=(Settings(),), daemon=True).start()
 
 
 server.setup_fnc = prewarm
@@ -200,6 +203,7 @@ async def entrypoint(ctx: JobContext) -> None:
     started_at = datetime.now(timezone.utc).isoformat()
 
     session = AgentSession(
+        conn_options=session_conn_options(settings),
         vad=ctx.proc.userdata["vad"],
         stt=openai.STT(
             base_url=settings.stt_base_url,

@@ -6,7 +6,9 @@ Model quality is checked by test_scenarios_llm.py and evals/run_extraction.py.""
 from livekit.agents import AgentSession
 from livekit.plugins import openai
 
-from agent.config import Settings, no_think_body
+import time
+
+from agent.config import Settings, no_think_body, session_conn_options
 from agent.main import LeadQualifierAgent
 from agent.tools import LeadTools
 from tests.fake_openai import FakeOpenAI
@@ -30,7 +32,8 @@ async def _session(fake, crm, lead_id="L001"):
     llm = openai.LLM(base_url=fake.base_url, api_key="x", model=model, extra_body=no_think_body(model))
     lead = await crm.get_lead(lead_id)
     tools = LeadTools(crm, lead_id)
-    return AgentSession(llm=llm), LeadQualifierAgent(lead, tools, Settings()), tools
+    session = AgentSession(llm=llm, conn_options=session_conn_options(Settings()))
+    return session, LeadQualifierAgent(lead, tools, Settings()), tools
 
 
 async def test_tool_call_reaches_crm(crm):
@@ -75,3 +78,18 @@ async def test_think_text_is_never_spoken(crm):
                     if getattr(m, "type", None) == "message" and m.role == "assistant"]
     assert said and all("think" not in t.lower() and "greet" not in t for t in said)
     assert said[-1] == "Hello Sarah, this is Alex."
+
+
+async def test_slow_llm_does_not_time_out(crm, monkeypatch):
+    """A first token after 11 s (slower than LiveKit's 10 s default) must still work."""
+    def slow_policy(messages):
+        if messages[-1]["role"] == "user" and "slow" in str(messages[-1].get("content")):
+            time.sleep(11)
+        return "Thanks for waiting."
+
+    with FakeOpenAI(slow_policy) as fake:
+        session, agent, _ = await _session(fake, crm)
+        async with session:
+            await session.start(agent)
+            result = await session.run(user_input="this will be slow")
+            result.expect.contains_message(role="assistant")

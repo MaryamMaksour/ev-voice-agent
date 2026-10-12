@@ -28,6 +28,10 @@ class Settings:
     tts_model: str = field(default_factory=lambda: _env("TTS_MODEL", "kokoro"))
     tts_voice: str = field(default_factory=lambda: _env("TTS_VOICE", "af_heart"))
 
+    # a laptop running Qwen3 partly on CPU can take >10 s (LiveKit's default) to answer
+    llm_timeout: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT", "60")))
+    llm_max_retry: int = field(default_factory=lambda: int(_env("LLM_MAX_RETRY", "1")))
+
     turn_detection: str = field(default_factory=lambda: _env("TURN_DETECTION", "model"))
 
     default_lead_id: str = field(default_factory=lambda: _env("DEFAULT_LEAD_ID", "L001"))
@@ -43,3 +47,31 @@ def no_think_body(model: str) -> dict:
     if "qwen3" in model.lower():
         return {"think": False}
     return {}
+
+
+def session_conn_options(settings: Settings):
+    """Timeouts for the model calls; generous for the LLM so slow hardware doesn't fail."""
+    from livekit.agents import APIConnectOptions
+    from livekit.agents.voice.agent_session import SessionConnectOptions
+
+    return SessionConnectOptions(
+        llm_conn_options=APIConnectOptions(timeout=settings.llm_timeout, max_retry=settings.llm_max_retry),
+        stt_conn_options=APIConnectOptions(timeout=30),
+        tts_conn_options=APIConnectOptions(timeout=30),
+    )
+
+
+def warm_up_llm(settings: Settings) -> None:
+    """Ask the LLM for one token so Ollama loads the model before the first call."""
+    import httpx
+
+    try:
+        httpx.post(
+            f"{settings.llm_base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            json={"model": settings.llm_model, "max_tokens": 1,
+                  "messages": [{"role": "user", "content": "hi /no_think"}], **no_think_body(settings.llm_model)},
+            timeout=300,
+        )
+    except Exception:
+        pass  # warm-up is best effort; the call itself will report real errors
