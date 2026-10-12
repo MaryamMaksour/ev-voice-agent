@@ -102,6 +102,11 @@ python -m agent.main console                   # Ctrl+T switches between voice a
 python -m agent.main console --list-devices    # if the wrong mic/speaker is used, then --input-device / --output-device
 ```
 
+**Agent silent or something not working?** Check every service in one go. It prints which piece is broken and the command to fix it:
+```bash
+python -m agent.check --play     # Ollama, speech-to-text, text-to-speech, and a test sentence on your speakers
+```
+
 **Pick which lead the agent calls** with `DEFAULT_LEAD_ID` (the demo has L001…L020):
 ```bash
 DEFAULT_LEAD_ID=L007 python -m agent.main console --text        # macOS / Linux
