@@ -79,6 +79,36 @@ python -m agent.main download-files                     # VAD + turn-detector we
 pytest                                                  # unit + wiring tests, no GPU needed
 ```
 
+## Talk to the agent in the terminal
+
+LiveKit's **console mode** runs the agent on your machine with no LiveKit server and no browser. The CRM updates are real (SQLite), so check them after each call.
+
+**Text mode** (type to the agent). Needs only Ollama running:
+```bash
+ollama pull qwen3:8b
+python -m crm.sqlite_adapter --seed            # once
+python -m agent.main console --text
+```
+Type as if you were the lead, e.g. *"Yes, this is Sarah"*, *"My budget is 800 thousand"*, *"Call me tomorrow at 4pm"*, *"Stop calling me"*. Press `Ctrl+C` to hang up. Then check what was saved:
+```bash
+python -m crm.sqlite_adapter --show            # the lead's new status, budget, area...
+ls data/calls/                                 # full call record: transcript, CRM actions, latency
+```
+
+**Voice mode** (speak into the mic, hear the agent on your speakers). Also needs the speech services:
+```bash
+docker compose -f services/docker-compose.local.yml --env-file .env up -d stt tts   # whisper + Kokoro on CPU
+python -m agent.main console                   # Ctrl+T switches between voice and text
+python -m agent.main console --list-devices    # if the wrong mic/speaker is used, then --input-device / --output-device
+```
+
+**Pick which lead the agent calls** with `DEFAULT_LEAD_ID` (the demo has L001…L020):
+```bash
+DEFAULT_LEAD_ID=L007 python -m agent.main console --text        # macOS / Linux
+$env:DEFAULT_LEAD_ID="L007"; python -m agent.main console --text # Windows PowerShell
+```
+Use a headset in voice mode, so the agent doesn't hear itself through the speakers. If `download-files` can't reach Hugging Face, set `TURN_DETECTION=vad` in `.env`.
+
 ## Laptop with Ollama (start today, free)
 
 1. Install [Ollama](https://ollama.com).
