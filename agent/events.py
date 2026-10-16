@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,15 @@ from .extraction import extract_outcome, reconcile
 logger = logging.getLogger("voice-agent.events")
 
 
+# the agent asking the caller to say something again: a sign that speech-to-text missed it
+_REPEAT = re.compile(r"\b(sorry|pardon|apologi[sz]e)\b.{0,40}\b(repeat|again|catch that|hear you|didn'?t get)"
+                     r"|\bcould you (please )?(repeat|say that again)", re.I)
+
+
+def repeat_requests(transcript: list[dict]) -> int:
+    return sum(1 for t in transcript if t.get("role") == "agent" and _REPEAT.search(t.get("text", "")))
+
+
 @dataclass
 class CallEnded:
     call_id: str
@@ -32,6 +42,14 @@ class CallEnded:
     metrics: dict
     started_at: str
     ended_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    room: str = ""
+    models: dict = field(default_factory=dict)          # llm / stt / tts model names used on this call
+    ended_by: str = ""                                  # agent (end_call) / lead / error / not_reached ...
+    close_reason: str = ""                              # LiveKit's reason the session closed
+    tool_calls: list[dict] = field(default_factory=list)  # every tool the LLM called, with its output
+    line: dict | None = None                            # phone line result (3CX); None for browser calls
+    recording: dict | None = None                       # where the audio recording is, if recording is on
+    transfer: dict | None = None                        # caller asked for a person: what happened
 
 
 class PostCallProcessor:
@@ -43,6 +61,17 @@ class PostCallProcessor:
 
     async def handle(self, event: CallEnded) -> dict:
         record = asdict(event)
+        record["agent_closed"] = event.ended_by == "agent"
+        record["repeat_requests"] = repeat_requests(event.transcript)
+        if event.line and event.line.get("result") != "answered":
+            # nobody picked up: nothing to extract, just note the attempt
+            record["classification"] = "not_reached"
+            try:
+                await self.crm.add_note(event.lead_id, f"Call attempt: {event.line.get('label')} "
+                                                       f"(SIP {event.line.get('sip_status_code')})")
+            except Exception:
+                logger.exception("could not note the call attempt for %s", event.lead_id)
+            return self._save(event, record)
         try:
             lead = await self.crm.get_lead(event.lead_id)
             outcome = await extract_outcome(self.llm, self.model, lead, event.transcript)
@@ -58,11 +87,14 @@ class PostCallProcessor:
                 extraction=outcome.model_dump(mode="json"),
                 filled_after_call=fill.changes(),
                 disagreements=disagreements,
+                classification=outcome.outcome.value,
             )
         except Exception as e:  # never lose the call record because extraction failed
             logger.exception("post-call processing failed for %s", event.call_id)
             record["error"] = repr(e)
+        return self._save(event, record)
 
+    def _save(self, event: CallEnded, record: dict) -> dict:
         self.calls_dir.mkdir(parents=True, exist_ok=True)
         path = self.calls_dir / f"{event.call_id}.json"
         path.write_text(json.dumps(record, indent=2, default=str))

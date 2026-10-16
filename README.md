@@ -45,14 +45,72 @@ Caller (browser now / 3CX later)
 - `/no_think` at the end of the system prompt.
 - Any `<think>…</think>` text is stripped before text-to-speech, so it is never spoken.
 
+## What every call record keeps (`data/calls/<call>.json`)
+
+The [EV Agent Dashboard](https://github.com/MaryamMaksour/ev-agent-dashboard) reads these files.
+
+| Field | What it says |
+|---|---|
+| `metrics.llm_ttft` | **Time to first token:** shortest / typical (p50) / p95 / longest / average. Text mode too. |
+| `metrics.end_to_end`, `eou`, `tts_ttfb` | Caller stops talking → agent's first audio, and each stage of it |
+| `metrics.turn_details` | Every turn: each stage's time, LLM calls, tokens in/out, tokens per second, and the **slowest stage** |
+| `metrics.tokens` | Tokens in / out / total, per turn, tokens per second |
+| `metrics.stt`, `metrics.tts` | Audio seconds transcribed, characters spoken |
+| `ended_by`, `agent_closed`, `close_reason` | Who ended the call: `agent` (end_call), `lead`, `transferred`, `not_reached`, `error` |
+| `tool_calls` | Every tool the LLM called, its arguments and what it returned (`actions` keeps the CRM writes) |
+| `line` | **Phone line result:** answered / busy / no answer / declined / invalid number / line error, the SIP code, ring time, masked number |
+| `recording` | Where the audio recording is, or why it didn't start |
+| `transfer` | The caller asked for a person: the reason, where the call went, and whether it worked |
+| `classification` | `qualified`, `interested`, `callback`, `not_interested`, `do_not_call`, `wrong_number`, `no_conversation`, or `not_reached` |
+| `repeat_requests` | How often the agent asked the caller to repeat: a sign speech-to-text missed something |
+| `models` | LLM, STT and TTS models and the TTS voice used |
+
+## Phone calls, transfer to a person, recording
+
+**Phone calls through 3CX.**
+1. Create a LiveKit SIP **outbound trunk** that points at 3CX, and put its id in `.env` as `SIP_OUTBOUND_TRUNK_ID`.
+2. Run the worker (`python -m agent.main dev`), then:
+```bash
+python -m agent.dial --lead L003                     # the number in the CRM
+python -m agent.dial --lead L003 --number +9715...   # another number, e.g. your own to test
+```
+The agent rings the lead and only starts talking once they answer. If nobody answers, the call record says why (busy, no answer, declined, invalid number…), and a note is added to the lead in the CRM. Do-not-call leads are never dialled.
+
+**Transfer to a person.** Set `HUMAN_TRANSFER_TO` to a 3CX extension (`sip:201@your-3cx-host`) or a number (`tel:+9714…`). When the caller asks for a person, or asks something only a consultant can answer, the agent says it will connect them, then transfers the call. If there is no phone line (browser or console) or no `HUMAN_TRANSFER_TO`, it offers a callback instead and notes the request in the CRM.
+
+**Recording.** Set `RECORDING_ENABLED=1`. The agent then starts an audio-only LiveKit Egress recording of both sides when the call starts, and the greeting says the call is recorded. This needs the **LiveKit Egress** service, which is not in the compose files yet:
+- It runs as its own container.
+- It needs Redis, which must also be added to `livekit.yaml`.
+
+Recordings go to `RECORDING_FILEPATH` on the egress server, or to S3 with `RECORDING_S3_BUCKET` / `RECORDING_S3_REGION`. The S3 credentials belong to the egress server, not this app.
+
+These three features are written against LiveKit's SIP and Egress APIs and tested with fakes. **They have not been run against a real 3CX trunk or Egress server yet.** Try them with your own number first.
+
+## Speech accuracy (STT and TTS)
+
+```bash
+python -m evals.run_speech                          # round trip: TTS speaks 15 call sentences, STT writes them back
+python -m evals.run_speech --voice am_michael       # another caller voice
+python -m evals.run_speech --audio-dir my_calls/    # real recordings: a.wav + a.txt (what was said; optional "key: x, y")
+```
+
+The run reports:
+- **Accuracy** (1 − word error rate).
+- **Key-term accuracy:** names, areas and amounts, which must come through exactly because they go into the CRM.
+- STT and TTS speed.
+
+Targets: accuracy ≥ 90 %, key terms ≥ 95 %. Results are saved to `data/speech_evals/`.
+
+The round trip tests both models together. **Real recordings test STT on real voices, accents and phone audio, and are the result to trust.** Arabic needs an Arabic STT and TTS model first; with one, run `--language ar` on Arabic recordings.
+
 ## Repo layout
 
 ```
-agent/      main.py (worker), prompts.py, tools.py, extraction.py, events.py, metrics.py, make_token.py
+agent/      main.py (worker), prompts.py, tools.py, extraction.py, events.py, metrics.py, telephony.py, dial.py, make_token.py
 crm/        port.py (CRMClient), sqlite_adapter.py (demo), zoho_adapter.py
 services/   stt_server.py, docker-compose.yml (EC2), docker-compose.local.yml (laptop), livekit*.yaml
 deploy/     runpod_start.sh (Ollama + whisper on a RunPod pod)
-evals/      run_extraction.py: CRM-update accuracy on 15 sample transcripts
+evals/      run_extraction.py: CRM-update accuracy on 15 sample transcripts; run_speech.py: STT/TTS accuracy
 loadtest/   make_audio.py, sim_caller.py, run_load.py: calls-per-GPU test
 tests/      unit + wiring tests (no GPU), real-LLM scenario tests (opt-in)
 ```

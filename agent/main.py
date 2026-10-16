@@ -3,9 +3,11 @@
     python -m agent.main download-files   # one-time: VAD + turn-detector weights
     python -m agent.main dev              # connect to LiveKit, wait for calls
     python -m agent.main console          # talk to it in the terminal (no LiveKit server)
+    python -m agent.dial --lead L003      # phone the lead through 3CX (SIP_OUTBOUND_TRUNK_ID)
 
 Which lead is called: job metadata {"lead_id": "L003"} (explicit dispatch), else a room
 named "lead-L003" (or "lead-L003-anything"), else DEFAULT_LEAD_ID.
+Phone calls: job or room metadata {"dial": true} (the lead's CRM number) or {"phone_number": "+971..."}.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+from livekit import rtc
 from livekit.agents import (
     Agent,
     ChatContext,
@@ -29,6 +32,8 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     MetricsCollectedEvent,
+    FunctionToolsExecutedEvent,
+    RunContext,
     cli,
     function_tool,
 )
@@ -43,6 +48,7 @@ from openai import AsyncOpenAI
 
 from crm import Lead, make_crm
 
+from . import telephony
 from .config import Settings, no_think_body, session_conn_options, warm_up_llm
 from .events import CallEnded, InProcessBus, PostCallProcessor
 from .metrics import CallMetrics
@@ -58,7 +64,7 @@ Interest = Literal["hot", "warm", "cold"]
 
 
 class LeadQualifierAgent(Agent):
-    def __init__(self, lead: Lead, tools: LeadTools, settings: Settings) -> None:
+    def __init__(self, lead: Lead, tools: LeadTools, settings: Settings, recorded: bool = False) -> None:
         super().__init__(
             instructions=build_system_prompt(
                 lead,
@@ -77,11 +83,13 @@ class LeadQualifierAgent(Agent):
         self._lead = lead
         self._lead_tools = tools
         self._settings = settings
+        self._recorded = recorded
 
     async def on_enter(self) -> None:
         self.session.generate_reply(
             instructions=greeting_instructions(
-                self._lead, company=self._settings.company_name, agent_name=self._settings.agent_name
+                self._lead, company=self._settings.company_name, agent_name=self._settings.agent_name,
+                recorded=self._recorded,
             )
         )
 
@@ -144,6 +152,17 @@ class LeadQualifierAgent(Agent):
         """Use when the caller asks not to be called again."""
         return await self._lead_tools.mark_do_not_call()
 
+    @function_tool
+    async def transfer_to_human(self, context: RunContext, reason: str) -> str:
+        """Connect the caller to a person when they ask for one, or ask something only a
+        consultant can answer (exact prices, contracts, payment plans).
+
+        Args:
+            reason: Why the caller needs a person, in a few words.
+        """
+        await context.wait_for_playout()  # let "I'll connect you" finish before the line changes
+        return await self._lead_tools.transfer_to_human(reason)
+
 
 def resolve_lead_id(ctx: JobContext, default: str) -> str:
     if ctx.job.metadata:
@@ -156,6 +175,25 @@ def resolve_lead_id(ctx: JobContext, default: str) -> str:
     # "lead-L003" or "lead-L003-sim7" (load test) -> L003
     match = re.match(r"^lead-([A-Za-z0-9]+)", ctx.room.name)
     return match.group(1) if match else default
+
+
+def outbound_number(ctx: JobContext, lead: Lead) -> str | None:
+    """The number to phone, if this job is a phone call: {"phone_number": ...} or {"dial": true}."""
+    for raw in (ctx.job.metadata, getattr(ctx.job.room, "metadata", "")):
+        try:
+            meta = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(meta, dict) and meta.get("phone_number"):
+            return str(meta["phone_number"])
+        if isinstance(meta, dict) and meta.get("dial"):
+            return lead.phone
+    return None
+
+
+# LiveKit's reason the session closed -> who ended the call (when the agent's end_call didn't)
+ENDED_BY = {"participant_disconnected": "lead", "user_initiated": "lead", "error": "error",
+            "job_shutdown": "shutdown", "task_completed": "agent"}
 
 
 def transcript_from(session: AgentSession) -> list[dict]:
@@ -198,7 +236,22 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx.shutdown(reason="do_not_call")
         return
 
-    tools = LeadTools(crm, lead_id, tz=settings.timezone)
+    call: dict = {"ended_by": "", "close_reason": "", "tool_calls": [], "line": None, "recording": None}
+
+    async def transfer_call(reason: str) -> dict:
+        if not settings.human_transfer_to:
+            return {"ok": False, "error": "HUMAN_TRANSFER_TO is not set"}
+        caller = next((p for p in ctx.room.remote_participants.values()
+                       if p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP), None)
+        if caller is None:
+            return {"ok": False, "error": "this call has no phone line (browser or console test)"}
+        result = await telephony.transfer(ctx.api, room=ctx.room.name, identity=caller.identity,
+                                          to=settings.human_transfer_to)
+        if result.get("ok"):
+            call["ended_by"] = "transferred"
+        return result
+
+    tools = LeadTools(crm, lead_id, tz=settings.timezone, transfer=transfer_call)
     call_metrics = CallMetrics()
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -243,6 +296,19 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_metrics(ev: MetricsCollectedEvent) -> None:
         call_metrics.on_metrics(ev.metrics)
 
+    @session.on("function_tools_executed")
+    def _on_tools(ev: FunctionToolsExecutedEvent) -> None:
+        # every tool the LLM called, with what it returned (the CRM writes alone are in tools.actions)
+        for fc, out in zip(ev.function_calls, ev.function_call_outputs):
+            call["tool_calls"].append({
+                "name": fc.name, "arguments": fc.arguments,
+                "output": (out.output or "")[:500] if out else None,
+                "is_error": bool(out and out.is_error),
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            })
+            if fc.name == "end_call":
+                call["ended_by"] = "agent"
+
     llm_client = AsyncOpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
     bus = InProcessBus(PostCallProcessor(crm, llm_client, settings.llm_model, settings.calls_dir))
 
@@ -261,12 +327,25 @@ async def entrypoint(ctx: JobContext) -> None:
                 actions=tools.actions,
                 metrics=call_metrics.summary(),
                 started_at=started_at,
+                room=ctx.room.name,
+                models={"llm": settings.llm_model, "stt": settings.stt_model, "tts": settings.tts_model,
+                        "tts_voice": settings.tts_voice},
+                ended_by=call["ended_by"] or ENDED_BY.get(call["close_reason"], call["close_reason"]),
+                close_reason=call["close_reason"],
+                tool_calls=call["tool_calls"],
+                line=call["line"],
+                recording=call["recording"],
+                transfer=tools.transfer,
             )
         )
         logger.info("latency summary: %s", call_metrics.summary())
 
+    def _on_close(ev) -> None:
+        call["close_reason"] = getattr(ev.reason, "value", str(ev.reason))
+        publish_call_ended()
+
     # write the CRM note as soon as the caller hangs up, not when the room closes
-    session.on("close", lambda _ev: publish_call_ended())
+    session.on("close", _on_close)
 
     async def on_shutdown() -> None:
         publish_call_ended()
@@ -274,7 +353,31 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(on_shutdown)
 
-    await session.start(agent=LeadQualifierAgent(lead, tools, settings), room=ctx.room)
+    number = outbound_number(ctx, lead)
+    if number:
+        # a phone call through 3CX: ring the lead and only start talking once they answer
+        if settings.sip_outbound_trunk_id:
+            await ctx.connect()
+            call["line"] = await telephony.dial(
+                ctx.api, room=ctx.room.name, number=number, trunk_id=settings.sip_outbound_trunk_id,
+                identity=f"sip-{lead_id}", name=lead.name, ring_timeout=settings.ring_timeout)
+        else:
+            call["line"] = {"result": "failed", "label": telephony.LINE_RESULTS["failed"],
+                            "number": telephony.mask_number(number),
+                            "sip_status": "SIP_OUTBOUND_TRUNK_ID is not set"}
+        if call["line"]["result"] != "answered":
+            call["ended_by"] = "not_reached"
+            publish_call_ended()
+            ctx.shutdown(reason=f"line_{call['line']['result']}")
+            return
+
+    if settings.recording_enabled:
+        call["recording"] = await telephony.start_recording(
+            ctx.api, room=ctx.room.name, s3=settings.recording_s3(),
+            filepath=settings.recording_filepath.format(room=ctx.room.name, lead=lead_id))
+
+    recorded = bool(call["recording"] and call["recording"].get("ok"))
+    await session.start(agent=LeadQualifierAgent(lead, tools, settings, recorded=recorded), room=ctx.room)
 
 
 if __name__ == "__main__":

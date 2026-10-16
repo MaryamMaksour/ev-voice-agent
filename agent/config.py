@@ -37,6 +37,25 @@ class Settings:
     default_lead_id: str = field(default_factory=lambda: _env("DEFAULT_LEAD_ID", "L001"))
     calls_dir: str = field(default_factory=lambda: _env("CALLS_DIR", "data/calls"))
 
+    # --- phone line: 3CX through a LiveKit SIP outbound trunk (empty = browser / console calls only)
+    sip_outbound_trunk_id: str = field(default_factory=lambda: _env("SIP_OUTBOUND_TRUNK_ID", ""))
+    ring_timeout: int = field(default_factory=lambda: int(_env("RING_TIMEOUT", "30")))
+    # where "transfer to a person" goes: tel:+9714xxxxxxx or sip:201@your-3cx-host (empty = offer a callback)
+    human_transfer_to: str = field(default_factory=lambda: _env("HUMAN_TRANSFER_TO", ""))
+
+    # --- recording with LiveKit Egress (needs the egress service; see README)
+    recording_enabled: bool = field(default_factory=lambda: _env("RECORDING_ENABLED", "0") in ("1", "true", "yes"))
+    recording_filepath: str = field(default_factory=lambda: _env("RECORDING_FILEPATH", "recordings/{room}.ogg"))
+    recording_s3_bucket: str = field(default_factory=lambda: _env("RECORDING_S3_BUCKET", ""))
+    recording_s3_region: str = field(default_factory=lambda: _env("RECORDING_S3_REGION", ""))
+
+    def recording_s3(self) -> dict | None:
+        """S3 upload settings for recordings, or None to keep them on the egress server's disk.
+        Credentials come from the egress server's own AWS role or environment, never from here."""
+        if not self.recording_s3_bucket:
+            return None
+        return {"bucket": self.recording_s3_bucket, "region": self.recording_s3_region}
+
 
 def no_think_body(model: str) -> dict:
     """Qwen3 'thinking' adds seconds of latency; switch it off for voice turns.

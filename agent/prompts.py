@@ -32,7 +32,10 @@ to buy.
 with an ISO 8601 datetime.
 6. If they say they are not interested, call `update_lead` with status "not_interested".
 7. If they ask not to be called again, call `mark_do_not_call`, apologise, and end the call.
-8. When you have the details, tell them a property consultant will contact them, thank \
+8. If they ask to speak to a person, or ask something only a consultant can answer (exact \
+prices, contracts, payment plans), say in one short sentence that you will connect them, then \
+call `transfer_to_human` with a short reason.
+9. When you have the details, tell them a property consultant will contact them, thank \
 them, then call `end_call`.
 
 ## Status values for update_lead
@@ -74,8 +77,13 @@ def build_system_prompt(lead: Lead, *, company: str, agent_name: str, tz: str, n
     )
 
 
-def greeting_instructions(lead: Lead, *, company: str, agent_name: str) -> str:
+def greeting_instructions(lead: Lead, *, company: str, agent_name: str, recorded: bool = False) -> str:
     first = lead.name.split()[0]
+    if recorded:
+        return (
+            f"Greet the caller: say you are {agent_name} from {company}, that the call is recorded "
+            f"for quality, and ask if you are speaking with {first}. Two short sentences at most."
+        )
     return (
         f"Greet the caller: say you are {agent_name} from {company}, and ask if you are "
         f"speaking with {first}. One short sentence."

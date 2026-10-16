@@ -1,0 +1,17 @@
+[
+  {"id": "s01_identity", "text": "Yes, this is Sarah Johnson speaking.", "key": ["Sarah Johnson"]},
+  {"id": "s02_budget", "text": "My budget is around eight hundred thousand dollars.", "key": ["eight hundred thousand"]},
+  {"id": "s03_area_type", "text": "I'm looking for a two bedroom apartment in Dubai Marina.", "key": ["two bedroom", "apartment", "Dubai Marina"]},
+  {"id": "s04_callback", "text": "Call me back tomorrow at four in the afternoon.", "key": ["tomorrow", "four"]},
+  {"id": "s05_do_not_call", "text": "Please don't call me again.", "key": ["don't call"]},
+  {"id": "s06_timeline", "text": "We want to buy within the next three months.", "key": ["three months"]},
+  {"id": "s07_jvc", "text": "Is the villa in Jumeirah Village Circle still available?", "key": ["villa", "Jumeirah Village Circle"]},
+  {"id": "s08_townhouse", "text": "I'd prefer a townhouse near Arabian Ranches.", "key": ["townhouse", "Arabian Ranches"]},
+  {"id": "s09_dirhams", "text": "Around one point two million dirhams.", "key": ["one point two million", "dirhams"]},
+  {"id": "s10_wrong_number", "text": "Sorry, I think you have the wrong number.", "key": ["wrong number"]},
+  {"id": "s11_person", "text": "Can I speak to a real person, please?", "key": ["real person"]},
+  {"id": "s12_project", "text": "Send me the brochure for Emaar Beachfront.", "key": ["brochure", "Emaar Beachfront"]},
+  {"id": "s13_next_monday", "text": "Next Monday at ten in the morning works for me.", "key": ["next Monday", "ten"]},
+  {"id": "s14_family", "text": "We are a family of five, so we need a villa with a garden.", "key": ["five", "villa", "garden"]},
+  {"id": "s15_downtown", "text": "Something in Downtown Dubai, close to the metro.", "key": ["Downtown Dubai", "metro"]}
+]
