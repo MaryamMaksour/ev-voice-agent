@@ -176,6 +176,7 @@ services:
       RECORDING_FILEPATH: /out/{room}.ogg
       RECORDINGS_DIR: /app/data/recordings
       CALLS_DIR: /app/data/calls
+      BLOCKED_DIR: /app/data/blocked
       LOGS_DIR: /app/logs
     volumes:
       - ../data:/app/data

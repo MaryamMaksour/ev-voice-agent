@@ -231,6 +231,11 @@ python -m agent.dial --lead L003 --number +9715...   # ring your own number to t
 | `TURN_DETECTION` | `model` | `model` = LiveKit's local turn detector, `vad` = silence only |
 | `RECORDING_ENABLED` | 0 (laptop) | The server records anyway; `SERVER_RECORDING_ENABLED=0` turns that off |
 | `RECORDING_WAIT_SECONDS` | 10 | How long the post-call check waits for the recording file |
+| `CALL_TIMEZONE` | `Asia/Dubai` in `.env.example` | "Today", callback dates and the calling rules |
+| `MAX_CALLS_PER_DAY`, `MAX_CALLS_PER_WEEK` | 1, 2 | Phone calls per lead per day (calendar day) and per 7 days. 0 = no limit |
+| `BLOCKED_STATUSES` | `not_interested,do_not_call,wrong_number` | Never call leads with these CRM statuses |
+| `CALL_HOURS` | empty (24/7) | e.g. `09:00-18:00`: only call in this window |
+| `BLOCKED_DIR` | `data/blocked` | Dials the rules stopped, one line each (see [docs/call-record.md](docs/call-record.md)) |
 | `LOGS_DIR`, `LOG_LEVEL`, `LOG_KEEP_DAYS` | `logs`, INFO, 30 | Service logs |
 | `LOG_LLM_MESSAGES` | 1 | Save the full messages of each LLM request |
 | `CRM_BACKEND` | `sqlite` | `zoho` for Zoho CRM (see below) |
@@ -289,4 +294,4 @@ These custom lead fields must exist in the Leads layout: `Budget`, `Preferred_Ar
 - Arabic: needs an Arabic STT and TTS model.
 - 3CX trunk setup (the code is ready).
 - Failover across several GPU servers.
-- Recording consent and retention rules.
+- Recording consent and retention rules. (Calling limits are in place: see `MAX_CALLS_PER_DAY` and the other calling rules.)

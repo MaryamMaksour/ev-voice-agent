@@ -94,6 +94,21 @@ A `post_call` line has `attempt`, `model`, `request_id`, `seconds`, `prompt_toke
 (`update_lead`, `schedule_callback`, `mark_do_not_call`, `add_note`), `args`, `ok`, `error`, `seconds`,
 and `changed`: `{field: {before, after}}` for each field that changed.
 
+## `data/blocked/<YYYY-MM-DD>.jsonl`: dials the calling rules stopped
+
+Before any phone call (`agent.dial` and the agent worker), `agent/compliance.py` checks the calling rules. A blocked dial is not made and leaves no call record; it adds one line here (UTC date):
+
+| Field | Example | Meaning |
+|---|---|---|
+| `ts` | `2026-10-19T10:00:00+00:00` | When the dial was stopped (UTC) |
+| `lead_id` | `L003` | The lead |
+| `number` | `+97150*****67` | Masked number |
+| `rule` | `daily_limit` | `do_not_call`, `blocked_status` (not_interested / do_not_call / wrong_number), `daily_limit`, `weekly_limit`, `outside_hours` |
+| `detail` | `1 call(s) today; the limit is 1 per day` | Plain-English reason |
+| `source` | `worker` | `dial` (the `agent.dial` command) or `worker` (the agent, just before ringing) |
+
+Only phone calls count towards the limits (a call record with a `line`); browser and console tests don't, and blocked dials don't. "Per day" is the calendar day in `CALL_TIMEZONE`; "per week" is the last 7 days. The EV Agent Dashboard reads this folder.
+
 ## Service logs
 
 `logs/<service>/<YYYY-MM-DD>.jsonl`, one JSON object per line: `ts`, `level`, `logger`, `msg`, `service`,

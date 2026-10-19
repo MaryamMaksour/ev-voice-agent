@@ -19,6 +19,8 @@ __pycache__/
 # demo runtime data
 data/crm.db
 data/calls/
+data/blocked/
+data/health.json
 data/speech_evals/
 recordings/
 data/loadtest/

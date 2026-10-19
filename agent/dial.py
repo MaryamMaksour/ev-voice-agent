@@ -21,6 +21,7 @@ from livekit import api
 
 from crm import make_crm
 
+from .compliance import check_dial_with, record_blocked
 from .config import Settings
 from .telephony import mask_number
 
@@ -30,8 +31,11 @@ async def start_call(lead_id: str, number: str | None) -> str:
     if not settings.sip_outbound_trunk_id:
         raise SystemExit("SIP_OUTBOUND_TRUNK_ID is not set in .env: create the 3CX outbound trunk in LiveKit first.")
     lead = await make_crm().get_lead(lead_id)
-    if lead.do_not_call:
-        raise SystemExit(f"{lead_id} is on the do-not-call list: not calling.")
+    decision = check_dial_with(settings, lead)
+    if not decision.ok:
+        record_blocked(settings.blocked_dir, lead_id=lead_id, number=number or lead.phone, rule=decision.rule,
+                       detail=decision.detail, source="dial")
+        raise SystemExit(f"Not calling {lead_id}: {decision.detail} (rule: {decision.rule}).")
     meta = {"lead_id": lead_id, **({"phone_number": number} if number else {"dial": True})}
     room = f"lead-{lead_id}-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
     async with api.LiveKitAPI() as lk:  # reads LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET

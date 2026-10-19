@@ -52,7 +52,7 @@ from openai import AsyncOpenAI
 from crm import Lead, make_crm
 from crm.audited import AuditedCRM
 
-from . import telephony
+from . import compliance, telephony
 from .calllog import CallLogger
 from .config import (Settings, llm_server_info, no_think_body, no_think_prompt_suffix, session_conn_options,
                      warm_up_llm)
@@ -339,6 +339,17 @@ async def entrypoint(ctx: JobContext) -> None:
         call_log.close(reason="do_not_call")
         ctx.shutdown(reason="do_not_call")
         return
+    number = outbound_number(ctx, lead)
+    if number:
+        # a phone call: the calling rules decide whether we may dial at all (agent/compliance.py)
+        decision = compliance.check_dial_with(settings, lead)
+        if not decision.ok:
+            logger.warning("not calling lead %s: %s (%s)", lead_id, decision.rule, decision.detail)
+            compliance.record_blocked(settings.blocked_dir, lead_id=lead_id, number=number, rule=decision.rule,
+                                      detail=decision.detail, source="worker")
+            call_log.close(reason=f"blocked_{decision.rule}")
+            ctx.shutdown(reason=f"blocked_{decision.rule}")
+            return
     # looked up in the background so the greeting isn't delayed; read when the call ends
     llm_info_task = asyncio.ensure_future(asyncio.to_thread(llm_server_info, settings))
     versions_task = asyncio.ensure_future(asyncio.to_thread(versions))
@@ -470,7 +481,6 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(on_shutdown)
 
-    number = outbound_number(ctx, lead)
     if number:
         # a phone call through 3CX: ring the lead and only start talking once they answer
         if settings.sip_outbound_trunk_id:

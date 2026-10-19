@@ -58,6 +58,15 @@ class Settings:
     default_lead_id: str = field(default_factory=lambda: _env("DEFAULT_LEAD_ID", "L001"))
     calls_dir: str = field(default_factory=lambda: _env("CALLS_DIR", "data/calls"))
 
+    # --- rules checked before dialing a lead (agent/compliance.py); blocked dials go to BLOCKED_DIR
+    max_calls_per_day: int = field(default_factory=lambda: int(_env("MAX_CALLS_PER_DAY", "1")))
+    max_calls_per_week: int = field(default_factory=lambda: int(_env("MAX_CALLS_PER_WEEK", "2")))
+    blocked_statuses: frozenset = field(default_factory=lambda: frozenset(
+        s.strip() for s in _env("BLOCKED_STATUSES", "not_interested,do_not_call,wrong_number").split(",") if s.strip()))
+    # "09:00-18:00" in CALL_TIMEZONE; empty = any time (24/7)
+    call_hours: str = field(default_factory=lambda: _env("CALL_HOURS", ""))
+    blocked_dir: str = field(default_factory=lambda: _env("BLOCKED_DIR", "data/blocked"))
+
     # --- logs: JSON lines per service in LOGS_DIR/<service>/<date>.jsonl (see agent/logging_setup.py)
     logs_dir: str = field(default_factory=lambda: _env("LOGS_DIR", "logs"))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
