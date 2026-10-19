@@ -1,0 +1,101 @@
+# CI: every push and pull request runs the tests, checks the compose files and builds the agent image.
+# CD: a push to main (or a manual run with "deploy" ticked) deploys to the company GPU server.
+#
+# The deploy job runs on a self-hosted GitHub runner installed on the GPU server (the server is on the
+# company network, so GitHub's own machines can't reach it). It stays off until the repo variable
+# DEPLOY_ENABLED is "true". Setup: README, section "CI/CD".
+name: CI/CD
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy this commit to the GPU server"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: System libraries (PortAudio, used by the terminal voice client)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2
+      - name: Install
+        run: pip install -e ".[dev,talk,loadtest]"
+      - name: Byte-compile everything
+        run: python -m compileall -q agent crm evals loadtest services tests
+      - name: Unit and wiring tests (fake LLM, no GPU)
+        run: pytest -q --junitxml=test-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results.xml
+
+  compose:
+    name: Compose files are valid
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: Server stack (LiveKit, Egress, Redis, vLLM, STT, TTS, agent)
+        run: docker compose -f services/docker-compose.yml --env-file .env config --quiet
+      - name: Laptop test stack (LiveKit, STT, TTS, optional Ollama)
+        run: docker compose -f services/docker-compose.local.yml --env-file .env --profile ollama config --quiet
+      - name: Deploy script syntax
+        run: bash -n deploy/deploy.sh && bash -n deploy/vllm_start.sh
+
+  image:
+    name: Agent image builds
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to the GPU server
+    needs: [test, compose, image]
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_dispatch' && inputs.deploy))
+    runs-on: [self-hosted, gpu-server]
+    environment: production
+    # one deploy at a time, and never cancel one half-way
+    concurrency:
+      group: deploy-gpu-server
+      cancel-in-progress: false
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy, check every service, roll back on failure
+        env:
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+        run: bash deploy/deploy.sh "${{ github.sha }}"

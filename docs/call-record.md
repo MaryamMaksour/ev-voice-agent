@@ -22,11 +22,12 @@ While post-call work is still running, the file is `<call_id>.raw.json`.
 | `line` | Phone line result (3CX): answered / busy / no answer / declined / invalid number, SIP code, ring time, masked number. `null` for terminal calls. |
 | `recording` | `ok`, `egress_id`, `file`, `path` on disk, `seconds`, or the error |
 | `transfer` | Caller asked for a person: reason, where it went, whether it worked |
-| `models` | `llm`, `stt`, `tts`, `tts_voice`, `served_by: vllm`, `llm_server` (model id, `max_model_len`) |
+| `models` | `llm`, `stt`, `tts`, `tts_voice`, `served_by` (`vllm` in production, `ollama` in tests), `llm_server` (model id; `max_model_len` on vLLM) |
 | `versions` | `code` (git sha), `prompt` (hash of the prompt text), `livekit_agents`, `livekit_plugins_openai`, `voice_agent` |
-| `settings` | Temperature, LLM timeout and retries, thinking off, turn detection, interruption mode, VAD thresholds, recording on/off, post-call mode |
+| `settings` | Temperature, LLM timeout and retries, thinking off, `llm_backend` (vllm / ollama), turn detection, interruption mode, VAD thresholds, recording on/off, post-call mode |
 | `errors` | Every pipeline error: `stage` (stt / llm / tts / vad / session / post_call), `error`, `at`, `recoverable` |
 | `post_call_seconds`, `error` | How long post-call work took; its error if it failed |
+| `post_call_llm` | The post-call LLM check: `requests` (more than 1 if the first JSON was invalid), `seconds`, `prompt_tokens`, `completion_tokens`, `ok` |
 | `log_files` | Paths of this call's files below `data/calls/` |
 
 ### `metrics`
@@ -65,6 +66,7 @@ One JSON object per line. Each line has `ts`, `t_ms` (milliseconds since the cal
 | `metrics.eou` | `end_of_utterance_delay`, `transcription_delay`, `on_user_turn_completed_delay` |
 | `metrics.llm` | `request_id`, `ttft`, `seconds`, `prompt_tokens`, `cached_tokens`, `completion_tokens`, `tokens_per_second` |
 | `metrics.tts` | `ttfb`, `seconds`, `audio_seconds`, `characters` |
+| `metrics.llm_post_call` | `attempt`, `model`, `seconds`, `prompt_tokens`, `completion_tokens`, `ok`, `error` |
 | `false_interruption` | `resumed` |
 | `error` | `stage`, `source`, `error`, `recoverable` |
 | `call_closed` | `ended_by`, `close_reason` |
@@ -72,9 +74,13 @@ One JSON object per line. Each line has `ts`, `t_ms` (milliseconds since the cal
 
 ## `data/calls/<call_id>/llm.jsonl`: every LLM request
 
+`stage` is `call` (a request during the call) or `post_call` (the transcript check after it).
+A `post_call` line has `attempt`, `model`, `request_id`, `seconds`, `prompt_tokens`, `completion_tokens`,
+`reply` (the JSON the model returned), `ok` and `error`. A `call` line has:
+
 | Field | What it says |
 |---|---|
-| `n`, `started_at`, `request_id` | Order in the call, start time, vLLM's request id |
+| `n`, `started_at`, `request_id` | Order in the call, start time, the LLM server's request id |
 | `messages`, `messages_count` | The full conversation sent (system prompt, turns, tool results). Turn off with `LOG_LLM_MESSAGES=0`. |
 | `tools`, `tools_hash` | Tool names offered |
 | `text`, `tool_calls` | The reply, and tool calls (`name`, `arguments`, `tool_call_id`) |
@@ -84,7 +90,7 @@ One JSON object per line. Each line has `ts`, `t_ms` (milliseconds since the cal
 
 ## `data/calls/<call_id>/crm_changes.jsonl`: every CRM write
 
-`source` (`call` = a tool during the call, `post_call` = the Celery worker), `action`
+`source` (`call` = a tool during the call, `post_call` = the check after the call), `action`
 (`update_lead`, `schedule_callback`, `mark_do_not_call`, `add_note`), `args`, `ok`, `error`, `seconds`,
 and `changed`: `{field: {before, after}}` for each field that changed.
 
@@ -96,5 +102,5 @@ plus `call_id`, `lead_id`, `room`, `job_id` on every line written during a call.
 | Service | Writes |
 |---|---|
 | `agent` | The worker and every call (LiveKit, pipeline, tools, CRM) |
-| `postcall` | Celery post-call tasks |
+| `postcall` | `python -m agent.postcall`: calls finished after a crash or restart |
 | `stt` | One line per transcription: engine, model, audio seconds, processing seconds, text |

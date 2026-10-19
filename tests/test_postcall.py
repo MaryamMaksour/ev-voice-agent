@@ -1,13 +1,14 @@
-"""Post-call work on Celery (eager mode, no Redis), the raw-record safety net, and the CRM audit."""
+"""Post-call work in the agent process, the raw-record safety net (agent.postcall), and the CRM audit."""
 
 import json
-from dataclasses import asdict
+import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from openai import AsyncOpenAI
 
-from agent import tasks
-from agent.events import CallEnded, CeleryBus, InProcessBus, PostCallProcessor, write_raw
+from agent.events import CallEnded, InProcessBus, PostCallProcessor, process_pending, write_raw
 from crm.audited import AuditedCRM
 from crm.port import LeadUpdate
 from tests.fake_openai import FakeOpenAI
@@ -26,61 +27,100 @@ def _event(call_id="c1", **kw) -> CallEnded:
                      actions=[], metrics={"turns": 1}, **kw)
 
 
-@pytest.fixture
-def eager(monkeypatch, tmp_path, crm):
-    """Celery runs tasks in-process; the task builds its own CRM and LLM client from the environment."""
-    monkeypatch.setenv("CRM_SQLITE_PATH", str(tmp_path / "crm.db"))  # the crm fixture's database
-    monkeypatch.setenv("CALLS_DIR", str(tmp_path / "calls"))
-    monkeypatch.setenv("LOGS_DIR", str(tmp_path / "logs"))
-    monkeypatch.setenv("RECORDINGS_DIR", str(tmp_path / "recordings"))
-    monkeypatch.setenv("RECORDING_WAIT_SECONDS", "0")
-    tasks.app.conf.task_always_eager = True
-    tasks.app.conf.task_eager_propagates = True
-    yield tmp_path
-    tasks.app.conf.task_always_eager = False
+def _processor(crm, fake, tmp_path) -> PostCallProcessor:
+    llm = AsyncOpenAI(base_url=fake.base_url, api_key="x")
+    return PostCallProcessor(crm, llm, "qwen3.5-9b", str(tmp_path / "calls"), logs_dir=str(tmp_path / "logs"))
 
 
-async def test_celery_task_runs_post_call_work(eager, crm, monkeypatch):
+async def test_in_process_bus_runs_post_call_work(crm, tmp_path):
+    calls = tmp_path / "calls"
     with FakeOpenAI(lambda messages: EXTRACTION) as fake:
-        monkeypatch.setenv("LLM_BASE_URL", fake.base_url)
-        event = _event(versions={"code": "abc"}, errors=[])
-        write_raw(event, eager / "calls")
-        # Celery tasks are sync and call asyncio.run, so run it outside this test's event loop
-        import asyncio
-        result = await asyncio.to_thread(lambda: tasks.process_call.delay(asdict(event)).get())
+        bus = InProcessBus(_processor(crm, fake, tmp_path))
+        bus.publish(_event(versions={"code": "abc"}, errors=[]))
+        assert (calls / "c1.raw.json").exists()  # saved before anything else can fail
+        await bus.drain()
 
-    assert result == {"call_id": "c1", "classification": "qualified", "error": None}
-    record = json.loads((eager / "calls" / "c1.json").read_text())
+    record = json.loads((calls / "c1.json").read_text())
     assert record["classification"] == "qualified" and record["duration_seconds"] == 210.0
     assert record["versions"] == {"code": "abc"} and record["post_call_seconds"] >= 0
     assert record["filled_after_call"]["preferred_area"] == "Dubai Hills"
-    assert not (eager / "calls" / "c1.raw.json").exists()  # replaced by the final record
+    assert not (calls / "c1.raw.json").exists()  # replaced by the final record
     lead = await crm.get_lead("L001")
     assert lead.status.value == "qualified" and lead.budget == 2000000
     # the post-call CRM writes are in the call's crm_changes.jsonl, after the call's own
-    changes = [json.loads(x) for x in (eager / "calls" / "c1" / "crm_changes.jsonl").read_text().splitlines()]
+    changes = [json.loads(x) for x in (calls / "c1" / "crm_changes.jsonl").read_text().splitlines()]
     assert {c["source"] for c in changes} == {"post_call"}
     assert {c["action"] for c in changes} == {"update_lead", "add_note"}
     assert changes[0]["t_ms"] > 200_000  # counted from the start of the call
     assert record["log_files"]["crm_changes"] == "c1/crm_changes.jsonl"
 
 
-async def test_celery_bus_falls_back_to_in_process_when_redis_is_down(crm, tmp_path, monkeypatch):
-    def broker_down(*a, **kw):
-        raise ConnectionError("redis down")
-
-    monkeypatch.setattr(tasks.process_call, "apply_async", broker_down)
+async def test_post_call_llm_request_is_timed_and_token_counted(crm, tmp_path):
+    calls = tmp_path / "calls"
     with FakeOpenAI(lambda messages: EXTRACTION) as fake:
-        from openai import AsyncOpenAI
+        await _processor(crm, fake, tmp_path).handle(_event())
 
-        llm = AsyncOpenAI(base_url=fake.base_url, api_key="x")
-        processor = PostCallProcessor(crm, llm, "qwen3.5-9b", str(tmp_path), logs_dir=str(tmp_path / "logs"))
-        bus = CeleryBus(str(tmp_path), fallback=InProcessBus(processor))
-        bus.publish(_event("c2"))
-        assert (tmp_path / "c2.raw.json").exists()  # saved before anything else can fail
-        await bus.drain()
-    assert json.loads((tmp_path / "c2.json").read_text())["classification"] == "qualified"
-    assert not (tmp_path / "c2.raw.json").exists()
+    record = json.loads((calls / "c1.json").read_text())
+    summary = record["post_call_llm"]
+    assert summary["requests"] == 1 and summary["ok"] is True
+    assert summary["prompt_tokens"] == 100 and summary["completion_tokens"] == 20  # from the fake server
+    assert summary["seconds"] >= 0
+    llm_lines = [json.loads(x) for x in (calls / "c1" / "llm.jsonl").read_text().splitlines()]
+    assert [x["stage"] for x in llm_lines] == ["post_call"]
+    assert llm_lines[0]["request_id"] and "Dubai Hills" in llm_lines[0]["reply"]
+    events = [json.loads(x)["event"] for x in (calls / "c1" / "events.jsonl").read_text().splitlines()]
+    assert "metrics.llm_post_call" in events
+
+
+async def test_invalid_json_is_retried_and_both_requests_logged(crm, tmp_path):
+    replies = iter(["not json at all", EXTRACTION])
+    with FakeOpenAI(lambda messages: next(replies)) as fake:
+        await _processor(crm, fake, tmp_path).handle(_event())
+
+    record = json.loads((tmp_path / "calls" / "c1.json").read_text())
+    assert record["classification"] == "qualified"
+    assert record["post_call_llm"]["requests"] == 2 and record["post_call_llm"]["ok"] is True
+    lines = [json.loads(x) for x in (tmp_path / "calls" / "c1" / "llm.jsonl").read_text().splitlines()]
+    assert [x["ok"] for x in lines] == [False, True] and "invalid JSON" in lines[0]["error"]
+
+
+async def test_llm_down_still_saves_the_record_with_the_error(crm, tmp_path):
+    llm = AsyncOpenAI(base_url="http://127.0.0.1:9/v1", api_key="x", max_retries=0)
+    processor = PostCallProcessor(crm, llm, "qwen3.5-9b", str(tmp_path / "calls"), logs_dir=str(tmp_path / "logs"))
+    await processor.handle(_event())
+
+    record = json.loads((tmp_path / "calls" / "c1.json").read_text())
+    assert record["error"] and record["errors"][-1]["stage"] == "post_call"
+    assert record["post_call_llm"]["requests"] == 1 and record["post_call_llm"]["ok"] is False
+
+
+async def test_pending_raw_calls_are_finished_later(crm, tmp_path):
+    """The agent died after the call: agent.postcall finishes the work from the raw file."""
+    calls = tmp_path / "calls"
+    old = write_raw(_event("crashed"), calls)
+    fresh = write_raw(_event("running"), calls)
+    an_hour_ago = time.time() - 3600
+    os.utime(old, (an_hour_ago, an_hour_ago))
+
+    with FakeOpenAI(lambda messages: EXTRACTION) as fake:
+        processor = _processor(crm, fake, tmp_path)
+        done = await process_pending(processor, min_age_seconds=300)
+        assert done == ["crashed"]  # the fresh one may still be in progress: left alone
+        assert await process_pending(processor, min_age_seconds=300) == []  # nothing left: safe to rerun
+        assert await process_pending(processor, min_age_seconds=0) == ["running"]
+
+    assert json.loads((calls / "crashed.json").read_text())["classification"] == "qualified"
+    assert not old.exists() and not fresh.exists()
+
+
+async def test_unreadable_raw_file_is_left_in_place(crm, tmp_path):
+    calls = tmp_path / "calls"
+    calls.mkdir()
+    broken = calls / "bad.raw.json"
+    broken.write_text("{not json")
+    with FakeOpenAI(lambda messages: EXTRACTION) as fake:
+        assert await process_pending(_processor(crm, fake, tmp_path), min_age_seconds=0) == []
+    assert broken.exists()
 
 
 async def test_audited_crm_reports_before_and_after(crm):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from enum import Enum
 
 from openai import AsyncOpenAI
@@ -73,8 +74,10 @@ def _parse_json(text: str) -> dict:
 
 
 async def extract_outcome(
-    client: AsyncOpenAI, model: str, lead: Lead, turns: list[dict], retries: int = 1
+    client: AsyncOpenAI, model: str, lead: Lead, turns: list[dict], retries: int = 1,
+    stats: list[dict] | None = None,
 ) -> CallOutcome:
+    """`stats`, if given, gets one entry per LLM request: seconds, tokens, whether the JSON was valid."""
     if not any(t["role"] == "user" and t.get("text") for t in turns):
         return CallOutcome(outcome=Outcome.NO_CONVERSATION, summary="No conversation with the lead.")
 
@@ -88,21 +91,41 @@ async def extract_outcome(
         },
     ]
     last_error: Exception | None = None
-    for _ in range(retries + 1):
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"name": "call_outcome", "schema": schema},
-            },
-            extra_body=no_think_body(model),
-        )
-        content = resp.choices[0].message.content or ""
+    for attempt in range(1, retries + 2):
+        t0 = time.perf_counter()
+        row: dict = {"attempt": attempt, "model": model}
         try:
-            return CallOutcome.model_validate(_parse_json(content))
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "call_outcome", "schema": schema},
+                },
+                extra_body=no_think_body(model),
+            )
+        except Exception as e:
+            row.update(seconds=round(time.perf_counter() - t0, 3), ok=False, error=repr(e))
+            if stats is not None:
+                stats.append(row)
+            raise
+        usage = getattr(resp, "usage", None)
+        content = resp.choices[0].message.content or ""
+        row.update(seconds=round(time.perf_counter() - t0, 3), request_id=getattr(resp, "id", None),
+                   prompt_tokens=getattr(usage, "prompt_tokens", None),
+                   completion_tokens=getattr(usage, "completion_tokens", None),
+                   reply=content[:2000])
+        try:
+            outcome = CallOutcome.model_validate(_parse_json(content))
+            row["ok"] = True
+            if stats is not None:
+                stats.append(row)
+            return outcome
         except (ValueError, ValidationError) as e:
+            row.update(ok=False, error=f"invalid JSON: {e}"[:500])
+            if stats is not None:
+                stats.append(row)
             last_error = e
             messages += [
                 {"role": "assistant", "content": content},

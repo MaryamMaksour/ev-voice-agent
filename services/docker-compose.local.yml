@@ -1,14 +1,21 @@
-# Laptop-only stack, no GPU: LiveKit + Redis + STT (Parakeet, CPU) + TTS (Kokoro, CPU) on the laptop,
-# the LLM is the vLLM server on the company GPU server (LLM_BASE_URL=http://<server-ip>:8000/v1).
+# Laptop test stack, no GPU needed: LiveKit + STT (Parakeet, CPU) + TTS (Kokoro, CPU).
+# The LLM for testing is Ollama (LLM_BASE_URL=http://localhost:11434/v1, LLM_MODEL=qwen3.5:9b):
+#   - Ollama app installed on the laptop (normal case), or
+#   - Ollama in Docker:  add --profile ollama to the command below, then
+#                        docker compose -f services/docker-compose.local.yml exec ollama ollama pull qwen3.5:9b
+# Or point LLM_BASE_URL at the vLLM server instead; nothing else changes.
 #   docker compose -f services/docker-compose.local.yml --env-file .env up -d
 #   python -m agent.main dev            # the agent, on the laptop
-#   python -m agent.talk --lead L003    # call it
-# The normal setup is everything on the GPU server: services/docker-compose.yml.
+#   python -m agent.talk --lead L003    # call it by voice
+# To test call recording on the laptop too: set LIVEKIT_NODE_IP to the laptop's IP and RECORDING_ENABLED=1
+# in .env, and add --profile recording (starts LiveKit Egress; recordings land in data/recordings/).
+# Production is everything on the GPU server: services/docker-compose.yml.
 
 services:
   livekit:
     image: livekit/livekit-server:v1.13.7
-    command: --config /etc/livekit.yaml
+    # LIVEKIT_NODE_IP: 127.0.0.1, or the laptop's own IP when recording (see livekit.local.yaml)
+    command: --config /etc/livekit.yaml --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
     volumes:
@@ -17,6 +24,30 @@ services:
       - "7880:7880"
       - "7881:7881"
       - "7882:7882/udp"
+    depends_on: [redis]
+
+  # LiveKit <-> Egress messages (call recording). Small; always on so LiveKit's config is the same.
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  # Call recording: only with --profile recording. Writes data/recordings/<room>.ogg
+  egress:
+    profiles: ["recording"]
+    image: livekit/egress:v1.14.1
+    cap_add: [SYS_ADMIN]
+    environment:
+      EGRESS_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY}
+        api_secret: ${LIVEKIT_API_SECRET}
+        ws_url: ws://livekit:7880
+        redis:
+          address: redis:6379
+        log_level: info
+    volumes:
+      - ../data/recordings:/out
+    depends_on: [livekit, redis]
 
   stt:
     build:
@@ -44,11 +75,18 @@ services:
     ports:
       - "8880:8880"
 
-  redis:
-    image: redis:7.4-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+  # only with --profile ollama (when the Ollama app isn't installed on the laptop)
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:0.40.5
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_KEEP_ALIVE: "24h"
+    volumes:
+      - ollama:/root/.ollama
     ports:
-      - "127.0.0.1:6379:6379"
+      - "11434:11434"
 
 volumes:
   hf-cache:
+  ollama:

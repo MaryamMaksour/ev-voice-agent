@@ -29,7 +29,7 @@ def policy(messages):
 
 async def _session(fake, crm, lead_id="L001"):
     model = "qwen3.5-9b"
-    llm = openai.LLM(base_url=fake.base_url, api_key="x", model=model, extra_body=no_think_body(model))
+    llm = openai.LLM(base_url=fake.base_url, api_key="x", model=model, extra_body=no_think_body(model, "vllm"))
     lead = await crm.get_lead(lead_id)
     tools = LeadTools(crm, lead_id)
     session = AgentSession(llm=llm, conn_options=session_conn_options(Settings()))

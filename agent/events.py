@@ -3,12 +3,13 @@
 The agent publishes a CallEnded event; a consumer runs extraction, fills missing CRM
 fields, writes the summary note, gathers the call's logs and saves the call record.
 
-  CeleryBus     (REDIS_URL set): the event goes to Redis; the postcall Celery worker
-                runs it (agent/tasks.py). Retries, survives an agent restart.
-  InProcessBus  (no REDIS_URL): same work in the agent process (laptop, tests).
+The consumer runs inside the agent's call process (InProcessBus), after the caller has
+hung up: it takes a second or two on vLLM, and the call process stays open until it is done.
+No Celery: at ~2,800 calls/day one process per call already runs this work in parallel.
 
-Either way the agent first writes data/calls/<call_id>.raw.json, so a call is never lost
-even if Redis or the worker is down; the final <call_id>.json replaces it."""
+Safety net: the agent first writes data/calls/<call_id>.raw.json. If the process dies before
+the final <call_id>.json replaces it, `python -m agent.postcall` finishes the work later
+(the agent container runs it at every start)."""
 
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+import time
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -93,6 +95,7 @@ class PostCallProcessor:
         call_log = CallLogger(self.calls_dir, event.call_id, started_at=event.started_at)
         crm = AuditedCRM(self.crm, call_log.crm_change, source="post_call")
         t0 = asyncio.get_running_loop().time()
+        llm_stats: list[dict] = []
         if event.line and event.line.get("result") != "answered":
             # nobody picked up: nothing to extract, just note the attempt
             record["classification"] = "not_reached"
@@ -104,7 +107,7 @@ class PostCallProcessor:
             return await self._finish(event, record, call_log, t0)
         try:
             lead = await crm.get_lead(event.lead_id)
-            outcome = await extract_outcome(self.llm, self.model, lead, event.transcript)
+            outcome = await extract_outcome(self.llm, self.model, lead, event.transcript, stats=llm_stats)
             fill, disagreements = reconcile(lead, outcome)
             if fill.changes():
                 await crm.update_lead(event.lead_id, fill)
@@ -124,6 +127,10 @@ class PostCallProcessor:
             record["error"] = repr(e)
             record["errors"] = [*record.get("errors", []), {"stage": "post_call", "error": repr(e),
                                                             "at": datetime.now(timezone.utc).isoformat()}]
+        # the post-call LLM check is timed and token-counted like the in-call requests
+        for row in llm_stats:
+            call_log.post_call_llm(row)
+        record["post_call_llm"] = post_call_llm_summary(llm_stats)
         return await self._finish(event, record, call_log, t0)
 
     async def _finish(self, event: CallEnded, record: dict, call_log: CallLogger, t0: float) -> dict:
@@ -152,6 +159,45 @@ class PostCallProcessor:
         (self.calls_dir / f"{event.call_id}.raw.json").unlink(missing_ok=True)
         logger.info("call record saved: %s", path)
         return record
+
+
+def post_call_llm_summary(rows: list[dict]) -> dict:
+    """Totals of the post-call LLM requests (more than one when the first JSON was invalid)."""
+    return {
+        "requests": len(rows),
+        "seconds": round(sum(r.get("seconds") or 0 for r in rows), 3),
+        "prompt_tokens": sum(r.get("prompt_tokens") or 0 for r in rows),
+        "completion_tokens": sum(r.get("completion_tokens") or 0 for r in rows),
+        "ok": bool(rows) and bool(rows[-1].get("ok")),
+    }
+
+
+def load_raw(path: str | Path) -> CallEnded:
+    """A <call_id>.raw.json back into the CallEnded event (unknown keys are ignored)."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    known = {f.name for f in fields(CallEnded)}
+    return CallEnded(**{k: v for k, v in data.items() if k in known})
+
+
+async def process_pending(processor: PostCallProcessor, *, min_age_seconds: float = 300) -> list[str]:
+    """Finish calls whose post-call work never completed (agent crashed or was restarted).
+
+    Only raw files older than `min_age_seconds` are taken, so a call that is being
+    processed right now is left alone. Returns the call ids that were processed."""
+    done: list[str] = []
+    now = time.time()
+    for raw in sorted(processor.calls_dir.glob("*.raw.json")):
+        if now - raw.stat().st_mtime < min_age_seconds:
+            continue
+        try:
+            event = load_raw(raw)
+        except (OSError, ValueError, TypeError):
+            logger.exception("unreadable raw call file %s; left in place", raw)
+            continue
+        logger.info("finishing post-call work for %s", event.call_id)
+        await processor.handle(event)
+        done.append(event.call_id)
+    return done
 
 
 def _seconds_between(start: str, end: str) -> float | None:
@@ -187,32 +233,3 @@ class InProcessBus:
         if self._worker:
             self._worker.cancel()
             self._worker = None
-
-
-class CeleryBus:
-    """Sends CallEnded to the postcall Celery worker through Redis.
-
-    If Redis can't be reached, the event is processed in this process instead
-    (`fallback`), so a broker outage never loses a call."""
-
-    def __init__(self, calls_dir: str, fallback: InProcessBus | None = None) -> None:
-        self.calls_dir = calls_dir
-        self._fallback = fallback
-
-    def publish(self, event: CallEnded) -> None:
-        from .tasks import process_call
-
-        write_raw(event, self.calls_dir)
-        try:
-            result = process_call.apply_async(args=[asdict(event)], retry=True,
-                                              retry_policy={"max_retries": 3, "interval_start": 0.5,
-                                                            "interval_step": 1.0, "interval_max": 3.0})
-            logger.info("call %s sent to the postcall worker (task %s)", event.call_id, result.id)
-        except Exception:
-            logger.exception("could not reach Redis; processing call %s in the agent instead", event.call_id)
-            if self._fallback is not None:
-                self._fallback.publish(event)
-
-    async def drain(self) -> None:
-        if self._fallback is not None:
-            await self._fallback.drain()

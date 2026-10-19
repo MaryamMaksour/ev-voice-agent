@@ -4,9 +4,10 @@
 #   mkdir -p data/recordings logs && chmod 777 data/recordings
 #   GIT_SHA=$(git rev-parse --short HEAD) docker compose -f services/docker-compose.yml --env-file .env up -d --build
 #   docker compose -f services/docker-compose.yml --env-file .env logs -f vllm   # first start downloads the model
-#   python -m agent.check                      # every service OK?
+#   docker compose -f services/docker-compose.yml exec agent python -m agent.check   # every service OK?
 #
 # Then, from a laptop on the same network:  python -m agent.talk --lead L003
+# Deploys after that are automatic (GitHub Actions -> deploy/deploy.sh), see README "CI/CD".
 #
 # Host networking keeps WebRTC simple and lets services reach each other on localhost.
 # Ports on the server: 7880 (LiveKit API/websocket), 7881/tcp + 7882/udp (call audio),
@@ -42,7 +43,8 @@ services:
       redis: {condition: service_healthy}
     restart: unless-stopped
 
-  # Redis: LiveKit <-> Egress messages, and the Celery queue for post-call work
+  # Redis: how LiveKit talks to Egress (call recording) and, later, the SIP service for 3CX.
+  # LiveKit needs it for that; the agent itself doesn't use it.
   redis:
     <<: *logs
     image: redis:7.4-alpine
@@ -97,7 +99,7 @@ services:
       VLLM_API_KEY: ${LLM_API_KEY:-}
     command: >
       --model ${VLLM_MODEL:-Qwen/Qwen3.5-9B}
-      --served-model-name ${LLM_MODEL:-qwen3.5-9b}
+      --served-model-name ${VLLM_SERVED_NAME:-qwen3.5-9b}
       --host 0.0.0.0 --port 8000
       --language-model-only
       --reasoning-parser qwen3
@@ -149,54 +151,46 @@ services:
     network_mode: host
     restart: unless-stopped
 
-  # --- the agent and its background work ---------------------------------------------------
-  # Agent worker: joins each call's room and runs VAD -> STT -> turn detector -> LLM -> TTS
+  # --- the agent ----------------------------------------------------------------------------
+  # Agent worker: joins each call's room and runs VAD -> STT -> turn detector -> LLM -> TTS.
+  # After each call it does the post-call work itself (extraction, CRM fill-in, summary, logs).
   agent:
     <<: *logs
+    image: ev-voice-agent:${GIT_SHA:-latest}
     build:
       context: ..
       args:
         GIT_SHA: ${GIT_SHA:-}
     network_mode: host
     env_file: ../.env
-    environment: &agent-env
+    environment:
       LIVEKIT_URL: ws://127.0.0.1:7880
+      # the server always uses its own vLLM, whatever the laptop's LLM_* lines say
+      LLM_BACKEND: vllm
       LLM_BASE_URL: http://127.0.0.1:8000/v1
+      LLM_MODEL: ${VLLM_SERVED_NAME:-qwen3.5-9b}
       STT_BASE_URL: http://127.0.0.1:8001/v1
       TTS_BASE_URL: http://127.0.0.1:8880/v1
-      REDIS_URL: redis://127.0.0.1:6379/0
-      RECORDING_ENABLED: ${RECORDING_ENABLED:-1}
+      # on for the server whatever the laptop's RECORDING_ENABLED says; SERVER_RECORDING_ENABLED=0 turns it off
+      RECORDING_ENABLED: ${SERVER_RECORDING_ENABLED:-1}
       RECORDING_FILEPATH: /out/{room}.ogg
       RECORDINGS_DIR: /app/data/recordings
       CALLS_DIR: /app/data/calls
       LOGS_DIR: /app/logs
-    volumes: &agent-volumes
+    volumes:
       - ../data:/app/data
       - ../logs:/app/logs
+    # first finish post-call work a crash or restart left behind, then wait for calls
+    command: ["sh", "-c", "python -m agent.postcall --min-age 0 || true; exec python -m agent.main start"]
+    # a deploy stops the old agent: LiveKit lets running calls finish first (up to 10 minutes)
+    stop_signal: SIGTERM
+    stop_grace_period: 10m
     depends_on:
       vllm: {condition: service_healthy}
       stt: {condition: service_healthy}
       tts: {condition: service_started}
       livekit: {condition: service_started}
       redis: {condition: service_healthy}
-    restart: unless-stopped
-
-  # Post-call worker (Celery): extraction, CRM fill-in, summary note, logs and recording per call
-  postcall-worker:
-    <<: *logs
-    build:
-      context: ..
-      args:
-        GIT_SHA: ${GIT_SHA:-}
-    network_mode: host
-    env_file: ../.env
-    environment: *agent-env
-    volumes: *agent-volumes
-    command: ["celery", "-A", "agent.tasks", "worker", "-Q", "postcall", "-c", "${POSTCALL_CONCURRENCY:-4}",
-              "--loglevel", "INFO"]
-    depends_on:
-      redis: {condition: service_healthy}
-      vllm: {condition: service_healthy}
     restart: unless-stopped
 
 volumes:

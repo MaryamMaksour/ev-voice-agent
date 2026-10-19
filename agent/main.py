@@ -54,11 +54,12 @@ from crm.audited import AuditedCRM
 
 from . import telephony
 from .calllog import CallLogger
-from .config import Settings, llm_server_info, no_think_body, session_conn_options, warm_up_llm
-from .events import CallEnded, CeleryBus, InProcessBus, PostCallProcessor
+from .config import (Settings, llm_server_info, no_think_body, no_think_prompt_suffix, session_conn_options,
+                     warm_up_llm)
+from .events import CallEnded, InProcessBus, PostCallProcessor
 from .logging_setup import bind_call, setup_logging
 from .metrics import CallMetrics
-from .prompts import build_system_prompt, greeting_instructions, prompt_version
+from .prompts import build_system_prompt, greeting_text, prompt_version
 from .tools import LeadTools
 
 load_dotenv()
@@ -79,7 +80,7 @@ class LeadQualifierAgent(Agent):
                 agent_name=settings.agent_name,
                 tz=settings.timezone,
                 now=datetime.now(ZoneInfo(settings.timezone)),
-            ),
+            ) + no_think_prompt_suffix(settings.llm_model, settings.llm_backend),
             tools=[
                 EndCallTool(
                     ignore_on_enter=True,
@@ -94,8 +95,9 @@ class LeadQualifierAgent(Agent):
         self._call_log = call_log
 
     async def on_enter(self) -> None:
-        self.session.generate_reply(
-            instructions=greeting_instructions(
+        # the greeting is fixed text spoken straight away (no LLM), so the wording is always right
+        self.session.say(
+            greeting_text(
                 self._lead, company=self._settings.company_name, agent_name=self._settings.agent_name,
                 recorded=self._recorded,
             )
@@ -290,17 +292,16 @@ def call_settings(settings: Settings, vad) -> dict:
                                                          "activation_threshold", "prefix_padding_duration")}
         if vad_opts else None,
         "stt_language": "en", "tts_format": "mp3", "recording": settings.recording_enabled,
-        "post_call": "celery" if settings.redis_url else "in_process",
+        "llm_backend": settings.llm_backend, "post_call": "in_process",
     }
 
 
-def make_bus(settings: Settings, crm, llm_client: AsyncOpenAI):
-    """Celery (REDIS_URL set) or in-process post-call work; Celery falls back to in-process if Redis is down."""
-    in_process = InProcessBus(PostCallProcessor(crm, llm_client, settings.llm_model, settings.calls_dir,
-                                                logs_dir=settings.logs_dir, recordings_dir=settings.recordings_dir))
-    if settings.redis_url:
-        return CeleryBus(settings.calls_dir, fallback=in_process)
-    return in_process
+def make_bus(settings: Settings, crm, llm_client: AsyncOpenAI) -> InProcessBus:
+    """Post-call work in this call's process, after the caller hangs up (see agent/events.py)."""
+    wait = settings.recording_wait_seconds if settings.recording_enabled else 0.0
+    return InProcessBus(PostCallProcessor(crm, llm_client, settings.llm_model, settings.calls_dir,
+                                          logs_dir=settings.logs_dir, recordings_dir=settings.recordings_dir,
+                                          wait_for_recording=wait))
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -377,7 +378,7 @@ async def entrypoint(ctx: JobContext) -> None:
             api_key=settings.llm_api_key,
             model=settings.llm_model,
             temperature=settings.llm_temperature,
-            extra_body=no_think_body(settings.llm_model),
+            extra_body=no_think_body(settings.llm_model, settings.llm_backend),
         ),
         tts=openai.TTS(
             base_url=settings.tts_base_url,
@@ -429,7 +430,7 @@ async def entrypoint(ctx: JobContext) -> None:
         published = True
         ended_by = call["ended_by"] or ENDED_BY.get(call["close_reason"], call["close_reason"])
         call_log.close(ended_by=ended_by, close_reason=call["close_reason"])
-        llm_info = _result(llm_info_task, {"served_by": "vllm", "model": settings.llm_model})
+        llm_info = _result(llm_info_task, {"served_by": settings.llm_backend, "model": settings.llm_model})
         bus.publish(
             CallEnded(
                 call_id=call_id,

@@ -8,7 +8,7 @@
 set -euo pipefail
 
 MODEL="${VLLM_MODEL:-Qwen/Qwen3.5-9B}"
-SERVED="${LLM_MODEL:-qwen3.5-9b}"
+SERVED="${VLLM_SERVED_NAME:-qwen3.5-9b}"
 LOG_DIR="${LOGS_DIR:-logs}/vllm"
 mkdir -p "$LOG_DIR"
 

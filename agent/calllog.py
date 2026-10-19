@@ -95,7 +95,7 @@ class CallLogger:
         """Called by the agent's llm_node before the request; returns the record to fill in."""
         self.counts["llm_requests"] += 1
         names = sorted(getattr(t, "id", None) or getattr(t, "name", None) or type(t).__name__ for t in tools)
-        rec: dict = {"n": self.counts["llm_requests"], "started_at": _now(), "_t": time.monotonic(),
+        rec: dict = {"stage": "call", "n": self.counts["llm_requests"], "started_at": _now(), "_t": time.monotonic(),
                      "tools": names, "tools_hash": hashlib.sha1(",".join(names).encode()).hexdigest()[:10],
                      "text": "", "tool_calls": [], "request_id": None, "ttft": None, "cancelled": False,
                      "error": None, "thinking_removed_chars": 0}
@@ -147,6 +147,11 @@ class CallLogger:
             self._llm_pending.setdefault(rid, []).append(rec)
         else:
             self._append("llm", rec)
+
+    def post_call_llm(self, row: dict) -> None:
+        """One post-call extraction request (agent/extraction.py): to llm.jsonl and the timeline."""
+        self._append("llm", {"stage": "post_call", **row})
+        self.event("metrics.llm_post_call", **{k: v for k, v in row.items() if k != "reply"})
 
     def _llm_metrics_arrived(self, m: Any) -> None:
         data = {"ttft": _r(m.ttft), "duration": _r(m.duration), "prompt_tokens": m.prompt_tokens,

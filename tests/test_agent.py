@@ -34,8 +34,8 @@ def test_prompt_contains_lead_context():
 
 def test_no_think_only_for_qwen3():
     off = {"chat_template_kwargs": {"enable_thinking": False}}
-    assert no_think_body("qwen3.5-9b") == off and no_think_body("Qwen/Qwen3.5-9B") == off
-    assert no_think_body("llama3.1") == {}
+    assert no_think_body("qwen3.5-9b", "vllm") == off and no_think_body("Qwen/Qwen3.5-9B", "vllm") == off
+    assert no_think_body("llama3.1", "vllm") == {}
 
 
 def _ctx(metadata: str, room: str):
@@ -58,3 +58,14 @@ def test_latency_summary():
     cm.on_metrics(SimpleNamespace(speech_id=None))  # ignored
     assert cm.summary()["turns"] == 0
     assert percentile([1, 2, 3, 4], 50) == 2.5
+
+
+def test_greeting_is_fixed_text():
+    from agent.prompts import greeting_text
+    from crm.port import Lead
+
+    lead = Lead(id="L003", name="Emily Davis", phone="+971500000000")
+    assert greeting_text(lead, company="Evolutions", agent_name="Alex") == \
+        "Hi, this is Alex from Evolutions. Am I talking to Emily?"
+    assert greeting_text(lead, company="Evolutions", agent_name="Alex", recorded=True) == \
+        "Hi, this is Alex from Evolutions. This call is recorded for quality. Am I talking to Emily?"

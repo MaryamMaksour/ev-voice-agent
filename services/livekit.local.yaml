@@ -1,9 +1,14 @@
 # Self-hosted LiveKit server for a laptop (browser and server on the same machine).
+# node_ip comes from LIVEKIT_NODE_IP in .env (docker-compose.local.yml passes it as --node-ip):
+#   127.0.0.1           enough for talking to the agent
+#   the laptop's own IP needed for recording: the Egress container reaches LiveKit's audio through it
 port: 7880
 rtc:
   tcp_port: 7881
   udp_port: 7882
   use_external_ip: false
-  node_ip: 127.0.0.1
+# Redis: how LiveKit talks to Egress (call recording)
+redis:
+  address: redis:6379
 logging:
   level: info

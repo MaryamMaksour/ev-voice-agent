@@ -77,22 +77,17 @@ def build_system_prompt(lead: Lead, *, company: str, agent_name: str, tz: str, n
     )
 
 
-def greeting_instructions(lead: Lead, *, company: str, agent_name: str, recorded: bool = False) -> str:
+def greeting_text(lead: Lead, *, company: str, agent_name: str, recorded: bool = False) -> str:
+    """The first thing the agent says, word for word. Fixed text (not written by the LLM), so it is
+    always correct and starts at once: "Hi, this is Alex from Evolutions. Am I talking to Emily?"."""
     first = lead.name.split()[0]
-    if recorded:
-        return (
-            f"Greet the caller: say you are {agent_name} from {company}, that the call is recorded "
-            f"for quality, and ask if you are speaking with {first}. Two short sentences at most."
-        )
-    return (
-        f"Greet the caller: say you are {agent_name} from {company}, and ask if you are "
-        f"speaking with {first}. One short sentence."
-    )
+    recorded_note = " This call is recorded for quality." if recorded else ""
+    return f"Hi, this is {agent_name} from {company}.{recorded_note} Am I talking to {first}?"
 
 
 def prompt_version() -> str:
     """Short hash of the prompt templates: changes whenever the wording changes."""
     import inspect
 
-    text = SYSTEM_PROMPT + inspect.getsource(greeting_instructions)
+    text = SYSTEM_PROMPT + inspect.getsource(greeting_text)
     return hashlib.sha1(text.encode()).hexdigest()[:10]
