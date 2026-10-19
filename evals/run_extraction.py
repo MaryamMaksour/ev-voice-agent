@@ -1,7 +1,7 @@
 """Demo test #3: CRM-update accuracy of the real LLM on the sample transcripts.
 
     python -m evals.run_extraction                     # uses LLM_BASE_URL / LLM_MODEL from .env
-    python -m evals.run_extraction --model qwen3:8b    # compare models
+    python -m evals.run_extraction --model qwen3.5-9b  # compare models (vLLM served-model-name)
 """
 
 from __future__ import annotations

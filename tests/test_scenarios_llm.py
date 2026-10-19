@@ -1,7 +1,7 @@
 """Demo test #4 with the REAL model, in text mode (no audio, speed doesn't matter).
 
-Skipped unless RUN_LLM_TESTS=1. Uses Ollama wherever it runs (laptop, RunPod pod or
-EC2) via LLM_BASE_URL / LLM_MODEL from .env:
+Skipped unless RUN_LLM_TESTS=1. Uses the vLLM server (Qwen3.5-9B on the company GPU
+server) via LLM_BASE_URL / LLM_MODEL from .env:
 
     RUN_LLM_TESTS=1 pytest tests/test_scenarios_llm.py -v
 """

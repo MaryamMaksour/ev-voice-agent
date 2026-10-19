@@ -1,325 +1,212 @@
-# AI Voice Agent: real-estate lead qualification (self-hosted, Ollama)
+# AI Voice Agent: real-estate lead qualification (self-hosted LiveKit + vLLM)
 
-The agent calls a lead, **checks the lead in the CRM before it speaks**, asks the qualifying questions, and **updates the CRM** during and after the call.
+The agent calls a lead, **checks the lead in the CRM before it speaks**, asks the qualifying questions,
+and **updates the CRM** during and after the call. Everything runs on the company GPU server:
 
-Everything is open source and self-hosted. The LLM (**Qwen3-8B / 14B**) is served by **Ollama** everywhere: laptop, RunPod and EC2. The stack is sized for about **2,800 calls/day** (30–40 calls at the same time at peak). This is the English demo that proves the approach works.
+- **Self-hosted LiveKit** for real-time audio. You talk to the agent **by voice from a terminal** today; a **3CX** phone line plugs in later through LiveKit SIP.
+- **Qwen3.5-9B on vLLM** as the LLM, with tool calls for CRM updates and thinking turned off.
+- **faster-whisper** speech-to-text and **Kokoro** text-to-speech.
+- **Celery on Redis** for the work after a call: transcript check, CRM fill-in, summary note, logs and recording.
+- **Every call fully logged**: recording, transcript, every LLM request and reply, tool calls, CRM changes before and after, timing of each STT, LLM and TTS step, tokens, and errors. This is what the [EV Agent Dashboard](https://github.com/MaryamMaksour/ev-agent-dashboard) reads.
 
-## Architecture
-
-The design uses four standard patterns:
-
-| Pattern | Where |
-|---|---|
-| **Cascaded voice pipeline on a WebRTC SFU** (LiveKit reference architecture): VAD → STT → turn detector → LLM + tools → TTS | `agent/main.py` |
-| **Microservices**: each model is its own service behind an OpenAI-compatible API | `services/` |
-| **Hexagonal (ports & adapters)**: the agent only knows `CRMClient`; SQLite or Zoho plug in | `crm/` |
-| **Event-driven post-call processing** (producer/consumer) | `agent/events.py` |
+**Architecture: [docs/architecture.md](docs/architecture.md)** · **Every logged field: [docs/call-record.md](docs/call-record.md)**
 
 ```
-Caller (browser now / 3CX later)
-        │ WebRTC
-        ▼
- LiveKit Server ◄──► Agent worker:  Silero VAD → STT → turn detector → LLM (+tools) → TTS
- (self-hosted)                          │ OpenAI API    │ OpenAI API        │ OpenAI API   │ CRM port
-                                        ▼               ▼                   ▼              ▼
-                                 Parakeet (CPU) /    Ollama             Kokoro       SQLite / Zoho
-                                 faster-whisper    (qwen3:8b / 14b)
-                                 (GPU)
-        call ends ─► CallEnded event ─► extraction (JSON schema) ─► fill missing fields + summary note ─► CRM
+ Laptop terminal (mic + speakers)                 Company GPU server  (services/docker-compose.yml)
+ python -m agent.talk --lead L003 ──WebRTC──►  LiveKit :7880 ◄──► Egress ──► data/recordings/
+   (later: 3CX ──SIP──► LiveKit SIP)              │
+                                                  ▼
+                                       Agent worker (one process per call)
+          Silero VAD → STT :8001 → turn detector → vLLM Qwen3.5-9B :8000 (+ CRM tools) → Kokoro TTS :8880
+                                                  │ every CRM write ─► AuditedCRM ─► SQLite / Zoho
+                                                  │ timeline, LLM requests, CRM changes ─► data/calls/<call>/
+                                                  ▼ call ends
+                                   Redis :6379 ─► Celery post-call worker
+                     extraction (vLLM) → fill CRM → summary note → logs + recording → data/calls/<call>.json
 ```
 
-**What happens on a call:**
-1. The agent loads the lead from the CRM: name, project of interest, and what's already known.
-2. It confirms identity, then asks about interest, budget, area, property type and timeline.
-3. It saves each fact with `update_lead` as soon as it hears it. Other tools: `schedule_callback`, `mark_do_not_call`, `end_call`.
-4. After the call, a structured-extraction pass double-checks the transcript:
-   - It fills fields the agent missed.
-   - It logs any disagreements.
-   - It enforces do-not-call.
-   - It writes a summary note to the CRM.
-   - It saves the call record (transcript, CRM actions, latency per turn) to `data/calls/`.
-5. Leads already marked do-not-call are never called.
+## What happens on a call
 
-**Qwen3 "thinking" is switched off** for voice speed in three ways:
-- Ollama's `think: false` flag on every request.
-- `/no_think` at the end of the system prompt.
-- Any `<think>…</think>` text is stripped before text-to-speech, so it is never spoken.
+1. `agent.talk` (or, later, 3CX) puts the caller in a LiveKit room named after the lead (`lead-L003-…`).
+2. LiveKit sends the room to the agent worker. The agent:
+   - loads the lead (name, project of interest, what's already known),
+   - skips leads marked do-not-call,
+   - starts the recording,
+   - greets the lead by name.
+3. It confirms who it is talking to, then asks about interest, budget, area, property type and timeline.
+4. It saves each fact with `update_lead` as soon as it hears it. Other tools: `schedule_callback`, `mark_do_not_call`, `transfer_to_human`, `end_call`.
+5. After the call, the Celery worker checks the transcript with the LLM:
+   - fills fields the agent missed and enforces do-not-call,
+   - writes a summary note to the CRM,
+   - saves the call record next to its logs and recording.
 
-## What every call record keeps (`data/calls/<call>.json`)
+**Thinking is off** for voice speed: every request sends `chat_template_kwargs: {enable_thinking: false}`. vLLM's `qwen3` reasoning parser keeps any thinking out of the reply, and the agent strips `<think>` text before speech as a last safety net. `reasoning_tokens` in `llm.jsonl` shows whether the model thought anyway.
 
-The [EV Agent Dashboard](https://github.com/MaryamMaksour/ev-agent-dashboard) reads these files.
+---
 
-| Field | What it says |
-|---|---|
-| `metrics.llm_ttft` | **Time to first token:** shortest / typical (p50) / p95 / longest / average. Text mode too. |
-| `metrics.end_to_end`, `eou`, `tts_ttfb` | Caller stops talking → agent's first audio, and each stage of it |
-| `metrics.turn_details` | Every turn: each stage's time, LLM calls, tokens in/out, tokens per second, and the **slowest stage** |
-| `metrics.tokens` | Tokens in / out / total, per turn, tokens per second |
-| `metrics.stt`, `metrics.tts` | Audio seconds transcribed, characters spoken |
-| `ended_by`, `agent_closed`, `close_reason` | Who ended the call: `agent` (end_call), `lead`, `transferred`, `not_reached`, `error` |
-| `tool_calls` | Every tool the LLM called, its arguments and what it returned (`actions` keeps the CRM writes) |
-| `line` | **Phone line result:** answered / busy / no answer / declined / invalid number / line error, the SIP code, ring time, masked number |
-| `recording` | Where the audio recording is, or why it didn't start |
-| `transfer` | The caller asked for a person: the reason, where the call went, and whether it worked |
-| `classification` | `qualified`, `interested`, `callback`, `not_interested`, `do_not_call`, `wrong_number`, `no_conversation`, or `not_reached` |
-| `repeat_requests` | How often the agent asked the caller to repeat: a sign speech-to-text missed something |
-| `models` | LLM, STT and TTS models and the TTS voice used |
+## 1. Start the server (company GPU server)
 
-## Phone calls, transfer to a person, recording
-
-**Phone calls through 3CX.**
-1. Create a LiveKit SIP **outbound trunk** that points at 3CX, and put its id in `.env` as `SIP_OUTBOUND_TRUNK_ID`.
-2. Run the worker (`python -m agent.main dev`), then:
-```bash
-python -m agent.dial --lead L003                     # the number in the CRM
-python -m agent.dial --lead L003 --number +9715...   # another number, e.g. your own to test
-```
-The agent rings the lead and only starts talking once they answer. If nobody answers, the call record says why (busy, no answer, declined, invalid number…), and a note is added to the lead in the CRM. Do-not-call leads are never dialled.
-
-**Transfer to a person.** Set `HUMAN_TRANSFER_TO` to a 3CX extension (`sip:201@your-3cx-host`) or a number (`tel:+9714…`). When the caller asks for a person, or asks something only a consultant can answer, the agent says it will connect them, then transfers the call. If there is no phone line (browser or console) or no `HUMAN_TRANSFER_TO`, it offers a callback instead and notes the request in the CRM.
-
-**Recording.** Set `RECORDING_ENABLED=1`. The agent then starts an audio-only LiveKit Egress recording of both sides when the call starts, and the greeting says the call is recorded. This needs the **LiveKit Egress** service, which is not in the compose files yet:
-- It runs as its own container.
-- It needs Redis, which must also be added to `livekit.yaml`.
-
-Recordings go to `RECORDING_FILEPATH` on the egress server, or to S3 with `RECORDING_S3_BUCKET` / `RECORDING_S3_REGION`. The S3 credentials belong to the egress server, not this app.
-
-These three features are written against LiveKit's SIP and Egress APIs and tested with fakes. **They have not been run against a real 3CX trunk or Egress server yet.** Try them with your own number first.
-
-## Speech accuracy (STT and TTS)
+Needs:
+- Docker with the NVIDIA container toolkit.
+- One NVIDIA GPU. 48 GB fits everything. On 24 GB, use FP8 (see `.env.example`).
+- Ports 7880/tcp, 7881/tcp and 7882/udp reachable from the laptops that will call.
 
 ```bash
-python -m evals.run_speech                          # round trip: TTS speaks 15 call sentences, STT writes them back
-python -m evals.run_speech --voice am_michael       # another caller voice
-python -m evals.run_speech --audio-dir my_calls/    # real recordings: a.wav + a.txt (what was said; optional "key: x, y")
+git clone https://github.com/MaryamMaksour/ev-voice-agent && cd ev-voice-agent
+cp .env.example .env                  # set LIVEKIT_API_SECRET (32+ chars); HF_TOKEN if needed
+mkdir -p data/recordings logs && chmod 777 data/recordings     # Egress writes recordings here
+GIT_SHA=$(git rev-parse --short HEAD) docker compose -f services/docker-compose.yml --env-file .env up -d --build
+docker compose -f services/docker-compose.yml --env-file .env logs -f vllm   # first start downloads Qwen3.5-9B (~19 GB)
 ```
 
-The run reports:
-- **Accuracy** (1 − word error rate).
-- **Key-term accuracy:** names, areas and amounts, which must come through exactly because they go into the CRM.
-- STT and TTS speed.
+Seed the demo CRM (20 leads, L001–L020) once, inside the agent container:
+```bash
+docker compose -f services/docker-compose.yml --env-file .env exec agent python -m crm.sqlite_adapter --seed
+```
 
-Targets: accuracy ≥ 90 %, key terms ≥ 95 %. Results are saved to `data/speech_evals/`.
+Check every service. It prints which one is broken and how to fix it:
+```bash
+docker compose -f services/docker-compose.yml --env-file .env exec agent python -m agent.check
+# LLM [ OK ] | STT [ OK ] | TTS [ OK ] | LiveKit [ OK ] | Redis [ OK ]
+```
 
-The round trip tests both models together. **Real recordings test STT on real voices, accents and phone audio, and are the result to trust.** Arabic needs an Arabic STT and TTS model first; with one, run `--language ar` on Arabic recordings.
+| Service | What | Port |
+|---|---|---|
+| `livekit` | LiveKit server (rooms, audio) | 7880, 7881/tcp, 7882/udp |
+| `redis` | Celery queue, LiveKit ↔ Egress | 6379 (localhost only) |
+| `egress` | Call recording | — |
+| `vllm` | Qwen3.5-9B | 8000 |
+| `stt` | faster-whisper large-v3-turbo | 8001 |
+| `tts` | Kokoro | 8880 |
+| `agent` | LiveKit agent worker | — |
+| `postcall-worker` | Celery post-call worker | — |
+
+**GPU memory:**
+- `VLLM_GPU_UTIL` (default 0.55) is the share vLLM takes. STT and TTS use the rest.
+- On a 24 GB card, set `VLLM_EXTRA_ARGS=--quantization fp8` and `VLLM_GPU_UTIL=0.6`.
+- **No Docker on the server?** `bash deploy/vllm_start.sh` starts vLLM with the same flags.
+
+## 2. Talk to the agent by voice from your laptop
+
+```bash
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e ".[talk]"
+cp .env.example .env     # same LIVEKIT_API_KEY / SECRET as the server, and:
+                         # LIVEKIT_URL=ws://<server-ip>:7880
+python -m agent.talk --lead L003
+```
+
+- You hear the agent and see live captions of both sides. **Ctrl+C** hangs up.
+- Use headphones. Echo cancellation is on, but headphones are cleaner.
+- Wrong mic or speaker? Run `python -m agent.talk --list-devices`, then `--input-device N --output-device M`.
+- Pick another lead with `--lead L007`.
+- **No sound card** (a server, a CI box): `--audio-file caller.wav --save-audio agent.wav --seconds 60` sends a recording as the caller and saves what the agent says.
+- **Quick test without the LiveKit server:** `python -m agent.main console` runs the agent inside your terminal and still uses the server's models. Set `LLM_BASE_URL` / `STT_BASE_URL` / `TTS_BASE_URL` to the server's address and open ports 8000, 8001 and 8880 to the laptop. `console --text` lets you type instead of speak.
+
+## 3. Where everything is saved
+
+On the server, after each call:
+
+```
+data/calls/<call_id>.json              the call record (dashboard): transcript, outcome, CRM changes,
+                                       latency per turn, tokens, models, versions, settings, errors
+data/calls/<call_id>/events.jsonl      timeline: who spoke when, every state change, tool call, CRM change, metric, error
+data/calls/<call_id>/llm.jsonl         every LLM request: full messages, reply, tool calls, tokens, time to first token
+data/calls/<call_id>/crm_changes.jsonl every CRM write during and after the call, before -> after
+data/calls/<call_id>/agent.log         this call's log lines (agent + post-call worker)
+data/calls/<call_id>/recording.ogg     both sides of the call
+logs/agent|postcall|stt/<date>.jsonl   all service logs as JSON, each line tagged with call_id
+```
+
+```bash
+python -m agent.check --calls                                  # where the time goes in recent calls
+grep '"call_id": "<call_id>"' logs/agent/$(date -u +%F).jsonl  # one call's lines from the service log
+docker compose -f services/docker-compose.yml logs vllm        # vLLM, LiveKit, Egress (rotated 10 × 50 MB)
+```
+
+Every field: [docs/call-record.md](docs/call-record.md).
+
+## 4. Phone calls through 3CX (later)
+
+The agent already handles phone calls:
+- `agent/dial.py` rings a lead.
+- `agent/telephony.py` handles the line result (busy, no answer…), transfer to a person, and recording.
+
+What's left is adding the LiveKit SIP service and the 3CX trunk. The steps are in [docs/architecture.md](docs/architecture.md#adding-3cx-later). Then:
+```bash
+python -m agent.dial --lead L003                     # ring the lead's CRM number
+python -m agent.dial --lead L003 --number +9715...   # ring your own number to test
+```
+
+## Settings (`.env`)
+
+| Setting | Default | What |
+|---|---|---|
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | | The LiveKit server and its keys |
+| `LLM_MODEL` | `qwen3.5-9b` | vLLM's served model name |
+| `VLLM_MODEL` | `Qwen/Qwen3.5-9B` | The Hugging Face model vLLM serves |
+| `LLM_TEMPERATURE`, `LLM_TIMEOUT` | 0.3, 30 | |
+| `VLLM_GPU_UTIL`, `VLLM_MAX_MODEL_LEN`, `VLLM_MAX_NUM_SEQS` | 0.55, 16384, 48 | GPU share, context length, calls answered at once |
+| `TURN_DETECTION` | `model` | `model` = LiveKit's local turn detector, `vad` = silence only |
+| `RECORDING_ENABLED` | 1 on the server | Record calls with Egress |
+| `REDIS_URL` | set by compose | Empty = post-call work runs inside the agent |
+| `LOGS_DIR`, `LOG_LEVEL`, `LOG_KEEP_DAYS` | `logs`, INFO, 30 | Service logs |
+| `LOG_LLM_MESSAGES` | 1 | Save the full messages of each LLM request |
+| `CRM_BACKEND` | `sqlite` | `zoho` for Zoho CRM (see below) |
+| `SIP_OUTBOUND_TRUNK_ID`, `HUMAN_TRANSFER_TO` | | 3CX, later |
 
 ## Repo layout
 
 ```
-agent/      main.py (worker), prompts.py, tools.py, extraction.py, events.py, metrics.py, telephony.py, dial.py, make_token.py
-crm/        port.py (CRMClient), sqlite_adapter.py (demo), zoho_adapter.py
-services/   stt_server.py, docker-compose.yml (EC2), docker-compose.local.yml (laptop), livekit*.yaml
-deploy/     runpod_start.sh (Ollama + whisper on a RunPod pod)
-evals/      run_extraction.py: CRM-update accuracy on 15 sample transcripts; run_speech.py: STT/TTS accuracy
-loadtest/   make_audio.py, sim_caller.py, run_load.py: calls-per-GPU test
-tests/      unit + wiring tests (no GPU), real-LLM scenario tests (opt-in)
+agent/      main.py (worker), talk.py (terminal caller), tasks.py (Celery), calllog.py (per-call logs),
+            logging_setup.py (JSON logs), prompts.py, tools.py, extraction.py, events.py, metrics.py,
+            telephony.py, dial.py, check.py, make_token.py
+crm/        port.py (CRMClient), audited.py (records every write), sqlite_adapter.py, zoho_adapter.py
+services/   docker-compose.yml (server), docker-compose.local.yml (laptop, no GPU), livekit*.yaml, stt_server.py
+deploy/     vllm_start.sh (vLLM without Docker)
+docs/       architecture.md, call-record.md
+evals/      run_extraction.py (CRM-update accuracy), run_speech.py (STT/TTS accuracy)
+loadtest/   calls-per-GPU test
+tests/      unit and wiring tests (no GPU), real-LLM scenario tests (opt-in)
 ```
 
-## Where to run it
-
-| Where | What it proves | Cost |
-|---|---|---|
-| **Laptop + Ollama** | The real Qwen3 model writes the right CRM updates (text mode) and the full call flow works. On a 4 GB GPU the model runs partly on CPU, so expect 5–20 s per voice turn. | Free |
-| **RunPod L40S pod** | Real voice latency with the real models, while AWS GPU quota is pending | ~$0.9/hr |
-| **EC2 g6e.xlarge** | Final latency and **calls per GPU** on the production hardware | ~$1.9/hr from AWS credits |
-
-The code is identical everywhere; only `.env` changes.
-
----
-
-## Setup (all profiles)
+## Tests
 
 ```bash
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[dev,loadtest]"
-cp .env.example .env                                    # then edit
-python -m crm.sqlite_adapter --seed                     # 20 demo leads in data/crm.db
-python -m agent.main download-files                     # VAD + turn-detector weights (once)
-pytest                                                  # unit + wiring tests, no GPU needed
+pip install -e ".[dev,talk]"
+pytest                                               # no GPU or server needed
+RUN_LLM_TESTS=1 pytest tests/test_scenarios_llm.py   # real scenarios against vLLM (LLM_BASE_URL in .env)
+python -m evals.run_extraction                       # CRM-update accuracy on 15 sample transcripts
+python -m evals.run_speech                           # STT/TTS accuracy (round trip, or --audio-dir real recordings)
 ```
 
-## Talk to the agent in the terminal
-
-LiveKit's **console mode** runs the agent on your machine with no LiveKit server and no browser. The CRM updates are real (SQLite), so check them after each call.
-
-**Text mode** (type to the agent). Needs only Ollama running:
+**Full dry run without a GPU.** Fake STT, LLM and TTS stand in for the models; LiveKit, Redis, Celery, the agent and `agent.talk` are real:
 ```bash
-ollama pull qwen3:8b
-python -m crm.sqlite_adapter --seed            # once
-python -m agent.main console --text
-```
-Type as if you were the lead, e.g. *"Yes, this is Sarah"*, *"My budget is 800 thousand"*, *"Call me tomorrow at 4pm"*, *"Stop calling me"*. Press `Ctrl+C` to hang up. Then check what was saved:
-```bash
-python -m crm.sqlite_adapter --show            # the lead's new status, budget, area...
-ls data/calls/                                 # full call record: transcript, CRM actions, latency
-```
-
-**Voice mode** (speak into the mic, hear the agent on your speakers). Also needs the speech services:
-```bash
-docker compose -f services/docker-compose.local.yml --env-file .env up -d --build stt tts   # Parakeet STT + Kokoro TTS on CPU
-python -m agent.main console                   # Ctrl+T switches between voice and text
-python -m agent.main console --list-devices    # if the wrong mic/speaker is used, then --input-device / --output-device
+python -m tests.stub_models --port 9000                    # fake models
+docker compose -f services/docker-compose.local.yml up -d livekit redis
+# .env: LLM_BASE_URL=STT_BASE_URL=TTS_BASE_URL=http://127.0.0.1:9000/v1  TURN_DETECTION=vad
+#       REDIS_URL=redis://127.0.0.1:6379/0  RECORDING_ENABLED=0
+celery -A agent.tasks worker -Q postcall -c 2 &
+python -m agent.main dev &
+python -m agent.talk --lead L003 --audio-file caller.wav --save-audio agent.wav --seconds 25
+ls data/calls/                                             # the call record and its log folder
 ```
 
-**Agent silent or something not working?** Check every service in one go. It prints which piece is broken and the command to fix it:
-```bash
-python -m agent.check --play     # Ollama, speech-to-text, text-to-speech, and a test sentence on your speakers
-```
+**Calls per GPU:**
+1. `python -m loadtest.make_audio`
+2. `python -m loadtest.run_load --levels 1,5,10,20,30,40`
 
-**Speech-to-text on the laptop is NVIDIA Parakeet TDT 0.6B** (via sherpa-onnx). It is more accurate than Whisper on English and transcribes a sentence in ~0.2–0.4 s on a plain CPU. The model (~650 MB) downloads on first start; watch it with `docker compose -f services/docker-compose.local.yml logs -f stt`. To run it without Docker:
-```bash
-pip install -e ".[stt]"
-$env:STT_ENGINE="parakeet"; python -m uvicorn --app-dir services stt_server:app --port 8001   # PowerShell
-STT_ENGINE=parakeet python -m uvicorn --app-dir services stt_server:app --port 8001          # macOS / Linux
-```
-
-**Why is it slow, and where does the time go?** After a few voice calls:
-```bash
-python -m agent.check --calls
-```
-It shows the average seconds per reply for each stage (speech-to-text, LLM, text-to-speech) and which one is slowest. On a 4 GB laptop GPU the LLM is almost always the slow part, because Qwen3-8B (~5 GB) doesn't fit and runs partly on the CPU. Things that help a little:
-- `OLLAMA_CONTEXT_LENGTH=4096`, `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0`, then restart Ollama. This frees GPU memory for more of the model.
-- Close other apps that use the GPU (browser tabs with video, games).
-
-Real-time speed (about 1 s per reply) needs the whole model on a GPU: an 8 GB+ card, a RunPod pod, or EC2.
-
-**Pick which lead the agent calls** with `DEFAULT_LEAD_ID` (the demo has L001…L020):
-```bash
-DEFAULT_LEAD_ID=L007 python -m agent.main console --text        # macOS / Linux
-$env:DEFAULT_LEAD_ID="L007"; python -m agent.main console --text # Windows PowerShell
-```
-Use a headset in voice mode, so the agent doesn't hear itself through the speakers. If `download-files` can't reach Hugging Face, set `TURN_DETECTION=vad` in `.env`.
-
-## Laptop with Ollama (start today, free)
-
-1. Install [Ollama](https://ollama.com).
-   - Set the context size: `OLLAMA_CONTEXT_LENGTH=8192`. On Windows, set it in *System → Environment Variables*, then restart Ollama.
-   - Pull the model:
-     ```bash
-     ollama pull qwen3:8b          # ~5 GB  (or qwen3:14b, ~9 GB)
-     ```
-2. In `.env`, keep `LLM_BASE_URL=http://localhost:11434/v1` and set `LLM_MODEL=qwen3:8b`.
-3. **Text-mode tests with the real model.** Speed doesn't matter here, so these are the main laptop results:
-   ```bash
-   python -m evals.run_extraction                          # demo test 3: CRM field accuracy (target >= 95%)
-   python -m evals.run_extraction --model qwen3:14b        # compare models
-   RUN_LLM_TESTS=1 pytest tests/test_scenarios_llm.py -v   # demo test 4: callback / not interested / DNC / wrong person
-   ```
-4. **Voice call (slow on a 4 GB GPU, just to see the flow):**
-   ```bash
-   docker compose -f services/docker-compose.local.yml --env-file .env up -d   # LiveKit + STT (CPU) + Kokoro (CPU)
-   python -m agent.main dev
-   python -m agent.make_token --lead L003
-   ```
-   Then open https://agents-playground.livekit.io in **Chrome**, choose manual connect, and paste the URL and token. Afterwards, check the result with `python -m crm.sqlite_adapter --show`.
-
-   No native Ollama install? Add `--profile ollama` to the compose command to run Ollama in Docker.
-
-## RunPod (no AWS quota needed)
-
-1. Create a pod with:
-   - 1× **L40S 48 GB**
-   - The "RunPod PyTorch" template
-   - A 100 GB volume
-   - HTTP ports `11434,8001` exposed
-2. In the pod terminal: `git clone <repo> && cd ev-voice-agent && LLM_MODEL=qwen3:14b bash deploy/runpod_start.sh`
-3. On the laptop `.env`, use the RunPod URLs (see `.env.example`). Then:
-   ```bash
-   docker compose -f services/docker-compose.local.yml --env-file .env up -d livekit tts
-   python -m agent.main dev
-   ```
-   Make calls from the Playground as above.
-
-## EC2 g6e.xlarge (final numbers)
-
-**AWS checklist:**
-1. **GPU quota:** Service Quotas → EC2 → *Running On-Demand G and VT instances* → **4 vCPUs**. If AWS refuses, reopen the case with a detailed use case.
-2. **Region:** pick one with g6e (`us-east-1`, `us-west-2`, `eu-west-1`).
-3. **AMI:** *AWS Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)*. It includes the driver, Docker and the nvidia-container-toolkit.
-4. **Disk:** 200 GB gp3.
-5. **Security group, your IP only:**
-   - 22/tcp
-   - 7880/tcp
-   - 7881/tcp
-   - **7882/udp** (WebRTC media)
-6. **Budget alert:** Billing → Budgets. **Stop the instance when you're not testing.**
-
-```bash
-git clone <repo> && cd ev-voice-agent
-cp .env.example .env            # set LIVEKIT_API_SECRET, LLM_MODEL=qwen3:14b (or qwen3:8b)
-mkdir -p data && docker run --rm -v $PWD:/app -w /app python:3.11-slim \
-  sh -c "pip install -q pydantic && python -m crm.sqlite_adapter --seed"
-docker compose -f services/docker-compose.yml --env-file .env up -d --build
-docker compose -f services/docker-compose.yml logs -f ollama-pull   # first start downloads the model
-```
-
-The compose file runs:
-- LiveKit
-- **Ollama** (GPU, model kept loaded, `OLLAMA_NUM_PARALLEL=16` requests at once)
-- faster-whisper (GPU)
-- Kokoro (GPU)
-- the agent
-
-**Fastest way to try it: keep using the laptop console, run only the models on AWS.**
-
-Nothing in your `.env` changes. The SSH tunnel makes the AWS models appear on `localhost`, and the security group only needs port 22.
-```bash
-# on the EC2 instance: only the three model services (no LiveKit, no agent)
-docker compose -f services/docker-compose.yml --env-file .env up -d --build ollama ollama-pull stt tts
-docker compose -f services/docker-compose.yml logs -f ollama-pull      # wait until the model is pulled
-
-# on your laptop (PowerShell or terminal): tunnel Ollama, STT and TTS to localhost
-ssh -i your-key.pem -N -L 11434:localhost:11434 -L 8001:localhost:8001 -L 8880:localhost:8880 ubuntu@<EC2-IP>
-
-# on your laptop, in a second terminal: stop local Ollama first so port 11434 is free
-python -m agent.check            # should show the LLM replying in well under a second
-python -m agent.main console     # same as before, now with the models on the GPU
-python -m agent.check --calls    # compare the time per stage with your laptop runs
-```
-Pick the AWS region closest to you that offers g6e. Each reply makes three round trips through the tunnel, so a far region adds noticeable delay.
-
-**Test calls from your laptop (full stack on EC2, browser Playground):**
-- Tunnel the signalling port: `ssh -L 7880:localhost:7880 ubuntu@<EC2-IP>`.
-- In the laptop `.env`, set `LIVEKIT_URL=ws://localhost:7880` with the same key and secret.
-- Run `python -m agent.make_token --lead L001` and use the Playground in Chrome.
-- Media goes directly to the instance over UDP 7882.
-
-**Calls-per-GPU test** (demo test 6). Run it from the laptop or a small CPU instance in the same region, not on the GPU box:
-```bash
-python -m loadtest.make_audio                         # caller voice via Kokoro (TTS_BASE_URL must reach the box)
-python -m loadtest.run_load --levels 1,5,10,20,30,40
-```
-It prints p50/p95 reply latency for each level and the GPU count needed for 2,800 calls/day. Repeat it for:
-- `LLM_MODEL=qwen3:8b` and `qwen3:14b`
-- `OLLAMA_NUM_PARALLEL` set to 8, 16 and 32 (it's the knob for concurrent LLM requests; each slot uses its own context memory)
-
-> **Watch the CPU, not only the GPU.** g6e.xlarge has only 4 vCPUs, and each call runs VAD and the turn-detector model on the CPU. If `load_avg_1m` in the results climbs above ~4 before the GPU is busy, the CPU is the limit. Either use g6e.2xlarge (8 vCPU), or run LiveKit + the agent on a normal CPU instance such as c7i.2xlarge (no GPU quota needed) and keep only the models on the GPU box.
->
-> The LLM is reached through the standard OpenAI API. If Ollama's request queueing turns out to be the limit, any other OpenAI-compatible server is a `.env` change, with no code change.
-
-## The demo tests
-
-| # | Test | How | Pass |
-|---|---|---|---|
-| 1 | Natural English call with interruptions | Playground calls | No talking over the caller, stays on script |
-| 2 | Agent checks the lead before speaking | Playground call | Greets by name, knows the project |
-| 3 | CRM updates correct, 8B vs 14B | `python -m evals.run_extraction --model qwen3:8b` | ≥ 95% of fields correct |
-| 4 | Scenarios: callback / not interested / do-not-call / wrong person | `RUN_LLM_TESTS=1 pytest tests/test_scenarios_llm.py` | All pass |
-| 5 | Latency per turn | `data/calls/*.json` → `metrics`, or `run_load --levels 1` | p50 < 1 s, p95 < 1.5 s (GPU) |
-| 6 | **Calls per GPU** | `python -m loadtest.run_load` | Highest level with p95 ≤ 1.5 s → GPU count for 2,800/day |
-
-## Dry run without any GPU
-
-`tests/stub_models.py` serves fake STT, LLM and TTS on one port. It lets you exercise LiveKit, the agent, the CRM and the load-test harness on any machine:
-```bash
-python -m tests.stub_models --port 9000
-# .env: LLM_BASE_URL / STT_BASE_URL / TTS_BASE_URL = http://localhost:9000/v1 ; TURN_DETECTION=vad
-```
+It prints p50/p95 reply latency for each level, and the GPU count needed for 2,800 calls/day.
 
 ## Switching to Zoho
 
-Set `CRM_BACKEND=zoho` and the `ZOHO_*` variables (use a **sandbox** first). Custom lead fields (`Budget`, `Preferred_Area`, `Property_Type`, `Timeline`, `Interest_Level`, `Callback_Time`, `Do_Not_Call`, `Project_Interest`) must exist in the Leads layout. Their API names can be overridden with `ZOHO_FIELD_<NAME>`.
+Set `CRM_BACKEND=zoho` and the `ZOHO_*` variables (use a **sandbox** first).
 
-## Out of scope for this demo
+These custom lead fields must exist in the Leads layout: `Budget`, `Preferred_Area`, `Property_Type`, `Timeline`, `Interest_Level`, `Callback_Time`, `Do_Not_Call`, `Project_Interest`. Their API names can be overridden with `ZOHO_FIELD_<NAME>`.
 
-Arabic, 3CX/SIP integration, production monitoring, failover, and compliance (recording consent, retention).
+## Not covered yet
+
+- Arabic: needs an Arabic STT and TTS model.
+- 3CX trunk setup (the code is ready).
+- Failover across several GPU servers.
+- Recording consent and retention rules.

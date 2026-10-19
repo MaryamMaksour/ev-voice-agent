@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 
 from crm.port import Lead
@@ -51,7 +52,6 @@ Interest level: hot (buying within 3 months), warm (3-12 months), cold (later or
 - Never invent prices, availability, or project details. If asked, say a consultant will \
 follow up with exact details.
 - Never read out internal tool names or field names.
-/no_think
 """
 
 
@@ -88,3 +88,11 @@ def greeting_instructions(lead: Lead, *, company: str, agent_name: str, recorded
         f"Greet the caller: say you are {agent_name} from {company}, and ask if you are "
         f"speaking with {first}. One short sentence."
     )
+
+
+def prompt_version() -> str:
+    """Short hash of the prompt templates: changes whenever the wording changes."""
+    import inspect
+
+    text = SYSTEM_PROMPT + inspect.getsource(greeting_instructions)
+    return hashlib.sha1(text.encode()).hexdigest()[:10]

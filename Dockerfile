@@ -10,4 +10,7 @@ COPY loadtest loadtest
 RUN pip install --no-cache-dir .
 # bake VAD + turn-detector weights into the image
 RUN python -m agent.main download-files
+# the code version saved in every call record (docker compose build --build-arg GIT_SHA=$(git rev-parse --short HEAD))
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
 CMD ["python", "-m", "agent.main", "start"]

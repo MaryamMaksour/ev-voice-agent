@@ -1,6 +1,6 @@
 """Check every service the agent needs, and say which one is broken.
 
-    python -m agent.check            # LLM (Ollama), STT, TTS
+    python -m agent.check            # LLM (vLLM), STT, TTS, LiveKit, Redis
     python -m agent.check --play     # also play a test sentence on your speakers
     python -m agent.check --calls    # where the time goes in your recent calls
 """
@@ -33,29 +33,36 @@ def _silence_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
 def check_llm(s: Settings, client: httpx.Client) -> bool:
     print(f"\nLLM  {s.llm_base_url}  model={s.llm_model}")
     try:
-        r = client.get(f"{s.llm_base_url}/models")
+        r = client.get(f"{s.llm_base_url}/models", headers={"Authorization": f"Bearer {s.llm_api_key}"})
         if r.status_code == 200:
-            names = [m.get("id") for m in r.json().get("data", [])]
+            models = r.json().get("data", [])
+            names = [m.get("id") for m in models]
             if names and s.llm_model not in names:
-                print(f"{FAIL} model '{s.llm_model}' is not pulled. Available: {names}")
-                print(f"       fix: ollama pull {s.llm_model}")
+                print(f"{FAIL} vLLM serves {names}, not '{s.llm_model}'.")
+                print("       fix: set LLM_MODEL in .env to vLLM's --served-model-name (VLLM_SERVED_NAME)")
                 return False
+            for m in models:
+                if m.get("id") == s.llm_model:
+                    print(f"       serving {m.get('root')}  max context {m.get('max_model_len')} tokens")
         t0 = time.perf_counter()
         r = client.post(
             f"{s.llm_base_url}/chat/completions",
             headers={"Authorization": f"Bearer {s.llm_api_key}"},
-            json={"model": s.llm_model, "messages": [{"role": "user", "content": "Say hello in five words. /no_think"}],
+            json={"model": s.llm_model, "messages": [{"role": "user", "content": "Say hello in five words."}],
                   "max_tokens": 40, **no_think_body(s.llm_model)},
             timeout=180,
         )
         r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"]
+        text = r.json()["choices"][0]["message"]["content"] or ""
         print(f"{OK} replied in {time.perf_counter() - t0:.1f}s: {text.strip()[:80]!r}")
-        if time.perf_counter() - t0 > 10:
-            print("       note: slow (model partly on CPU). The agent will pause this long before each reply.")
+        if "<think>" in text or "</think>" in text:
+            print("       note: the model is still thinking: check the vLLM --reasoning-parser flag")
+        if time.perf_counter() - t0 > 3:
+            print("       note: slow for a GPU. First request after start is slower (CUDA graphs); try again.")
         return True
     except httpx.ConnectError:
-        print(f"{FAIL} cannot connect. Is Ollama running? fix: start the Ollama app, or `ollama serve`")
+        print(f"{FAIL} cannot connect. Is vLLM running? fix: docker compose -f services/docker-compose.yml "
+              "--env-file .env up -d vllm   (first start downloads the model: docker compose ... logs -f vllm)")
     except Exception as e:
         print(f"{FAIL} {e!r}")
     return False
@@ -105,6 +112,56 @@ def check_tts(s: Settings, client: httpx.Client) -> bytes | None:
     return None
 
 
+def check_livekit(client: httpx.Client) -> bool:
+    """The self-hosted LiveKit server answers, and the API key/secret in .env are accepted."""
+    import asyncio
+    import os
+
+    url = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
+    print(f"\nLiveKit  {url}")
+    http = url.replace("wss://", "https://").replace("ws://", "http://")
+    try:
+        client.get(http, timeout=5)
+    except httpx.ConnectError:
+        print(f"{FAIL} cannot connect. fix: docker compose -f services/docker-compose.yml --env-file .env up -d livekit")
+        print("       from a laptop: LIVEKIT_URL must be ws://<server-ip>:7880 and ports 7880, 7881/tcp, 7882/udp open")
+        return False
+    except Exception:
+        pass  # any HTTP answer means the server is up
+
+    async def rooms() -> int:
+        from livekit import api
+
+        async with api.LiveKitAPI(url=http) as lk:
+            return len((await lk.room.list_rooms(api.ListRoomsRequest())).rooms)
+
+    try:
+        n = asyncio.run(rooms())
+        print(f"{OK} API keys accepted, {n} room(s) open")
+        return True
+    except Exception as e:
+        print(f"{FAIL} server is up but the API call failed: {e!r}")
+        print("       fix: LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env must match the server's LIVEKIT_KEYS")
+    return False
+
+
+def check_redis(s: Settings) -> bool | None:
+    """Redis (Celery broker for post-call work). None = not configured (post-call runs in the agent)."""
+    if not s.redis_url:
+        print("\nRedis  not set (REDIS_URL empty): post-call work runs inside the agent")
+        return None
+    print(f"\nRedis  {s.redis_url}")
+    try:
+        import redis
+
+        redis.Redis.from_url(s.redis_url, socket_connect_timeout=3).ping()
+        print(f"{OK} reachable")
+        return True
+    except Exception as e:
+        print(f"{FAIL} {e!r}  fix: docker compose -f services/docker-compose.yml --env-file .env up -d redis")
+    return False
+
+
 def play(wav_bytes: bytes) -> None:
     import array
 
@@ -129,7 +186,7 @@ def latency_report(calls_dir: str, last: int = 5) -> None:
         return
     labels = {
         "eou": "waiting for you to finish + speech-to-text",
-        "llm_ttft": "LLM first word (Ollama)",
+        "llm_ttft": "LLM first word (vLLM)",
         "tts_ttfb": "text-to-speech first audio",
     }
     print(f"\naverage time per reply, last {len(files)} call(s):")
@@ -151,8 +208,8 @@ def latency_report(calls_dir: str, last: int = 5) -> None:
     slowest = max(avg, key=avg.get)
     print(f"\nslowest: {labels[slowest]}")
     if slowest == "llm_ttft":
-        print("  the model is running partly on CPU. Speed it up: a GPU with >= 8 GB (RunPod / EC2),")
-        print("  or set OLLAMA_CONTEXT_LENGTH=4096 and OLLAMA_FLASH_ATTENTION=1, then restart Ollama.")
+        print("  vLLM is slow: check GPU memory (nvidia-smi), give it more with VLLM_GPU_UTIL, or")
+        print("  lower VLLM_MAX_MODEL_LEN so more calls fit in the KV cache.")
     elif slowest == "eou":
         print("  speech-to-text is slow: use STT_ENGINE=parakeet (fast on CPU).")
     else:
@@ -173,12 +230,16 @@ def main() -> None:
         llm = check_llm(s, client)
         stt = check_stt(s, client)
         audio = check_tts(s, client)
+        livekit = check_livekit(client)
+    redis_ok = check_redis(s)
     if args.play and audio:
         try:
             play(audio)
         except Exception as e:
             print(f"{FAIL} could not play audio: {e!r}")
-    print("\nsummary:", "LLM", OK if llm else FAIL, "| STT", OK if stt else FAIL, "| TTS", OK if audio else FAIL)
+    mark = lambda ok: OK if ok else FAIL  # noqa: E731
+    print("\nsummary:", "LLM", mark(llm), "| STT", mark(stt), "| TTS", mark(audio), "| LiveKit", mark(livekit),
+          "| Redis", "[ -- ]" if redis_ok is None else mark(redis_ok))
     if llm and not (stt and audio):
         print("text mode still works now:  python -m agent.main console --text")
 
