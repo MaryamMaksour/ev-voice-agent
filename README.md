@@ -31,11 +31,13 @@ and **updates the CRM** during and after the call. Everything runs on the compan
 2. LiveKit sends the room to the agent worker. The agent:
    - loads the lead (name, project of interest, what's already known),
    - skips leads marked do-not-call,
+   - before a phone call, checks the **calling rules** (at most 1 call per lead a day and 2 a week, never a lead who said not interested, do-not-call or wrong number) and that the LLM is answering; a blocked dial is logged in `data/blocked/` and not made,
    - starts the recording,
    - greets the lead by name.
 3. It confirms who it is talking to, then asks about interest, budget, area, property type and timeline.
-4. It saves each fact with `update_lead` as soon as it hears it. Other tools: `schedule_callback`, `mark_do_not_call`, `transfer_to_human`, `end_call`.
-5. After the caller hangs up, the same process checks the transcript with the LLM:
+4. If the LLM fails mid-call, the agent says a short sorry line, books a callback, adds a CRM note and ends the call, instead of going silent (`agent/fallback.py`).
+5. It saves each fact with `update_lead` as soon as it hears it. Other tools: `schedule_callback`, `mark_do_not_call`, `transfer_to_human`, `end_call`.
+6. After the caller hangs up, the same process checks the transcript with the LLM:
    - fills fields the agent missed and enforces do-not-call,
    - writes a summary note to the CRM,
    - saves the call record next to its logs and recording.
