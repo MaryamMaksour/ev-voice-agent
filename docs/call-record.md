@@ -94,6 +94,30 @@ A `post_call` line has `attempt`, `model`, `request_id`, `seconds`, `prompt_toke
 (`update_lead`, `schedule_callback`, `mark_do_not_call`, `add_note`), `args`, `ok`, `error`, `seconds`,
 and `changed`: `{field: {before, after}}` for each field that changed.
 
+## When the LLM fails mid-call
+
+LiveKit retries a failed LLM request (`LLM_MAX_RETRY`); if it still fails, the agent (`agent/fallback.py`) says a fixed sorry line, books a callback `LLM_FAILURE_CALLBACK_MINUTES` ahead (60), adds a CRM note and ends the call. The call record then has:
+
+| Field | Example |
+|---|---|
+| `ended_by` | `llm_failure` |
+| `fallback` | `{"reason": "llm", "at": "...", "said": true, "callback_at": "2026-10-19T11:00:00+00:00", "callback_booked": true, "note_added": true}` (plus `say_error` / `callback_error` / `note_error` when a step failed) |
+
+`events.jsonl` gets an `llm_failure` event with the same fields. Before ringing a lead, the worker also checks that the LLM answers (`GET /v1/models`, 3 s); if not, the dial is blocked with rule `llm_down` (below).
+
+## `data/health.json`: are the services up?
+
+The agent container runs `python -m agent.check --write /app/data/health.json --watch 60`: every minute it checks the LLM, STT, TTS, LiveKit and Redis and rewrites this file (atomically):
+
+```json
+{"ts": "2026-10-19T10:00:00+00:00",
+ "services": {"llm": {"ok": true, "seconds": 0.41, "error": null},
+              "stt": {"ok": false, "seconds": 3.0, "error": "[FAIL] cannot connect. fix: ..."},
+              "redis": {"ok": null, "seconds": null, "error": null}}}
+```
+
+`ok` is `null` when a service is skipped or not needed. The dashboard treats a file older than 5 minutes as "the checker stopped".
+
 ## `data/blocked/<YYYY-MM-DD>.jsonl`: dials the calling rules stopped
 
 Before any phone call (`agent.dial` and the agent worker), `agent/compliance.py` checks the calling rules. A blocked dial is not made and leaves no call record; it adds one line here (UTC date):
@@ -103,7 +127,7 @@ Before any phone call (`agent.dial` and the agent worker), `agent/compliance.py`
 | `ts` | `2026-10-19T10:00:00+00:00` | When the dial was stopped (UTC) |
 | `lead_id` | `L003` | The lead |
 | `number` | `+97150*****67` | Masked number |
-| `rule` | `daily_limit` | `do_not_call`, `blocked_status` (not_interested / do_not_call / wrong_number), `daily_limit`, `weekly_limit`, `outside_hours` |
+| `rule` | `daily_limit` | `do_not_call`, `blocked_status` (not_interested / do_not_call / wrong_number), `daily_limit`, `weekly_limit`, `outside_hours`, `llm_down` |
 | `detail` | `1 call(s) today; the limit is 1 per day` | Plain-English reason |
 | `source` | `worker` | `dial` (the `agent.dial` command) or `worker` (the agent, just before ringing) |
 

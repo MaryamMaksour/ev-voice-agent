@@ -4,14 +4,19 @@
     python -m agent.check --play     # also play a test sentence on your speakers
     python -m agent.check --calls    # where the time goes in your recent calls
     python -m agent.check --skip livekit,redis   # text-mode testing: only the models
+    python -m agent.check --write data/health.json --watch 60   # keep a health file for the dashboard
 
 Exit code 1 if a needed service fails, so the deploy (deploy/deploy.sh) can roll back.
+--write saves {"ts", "services": {"llm"|"stt"|"tts"|"livekit"|"redis": {"ok", "seconds", "error"}}}
+(ok = null when the service was skipped or isn't needed); --watch repeats it every N seconds.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
+import json
 import math
 import os
 import socket
@@ -243,30 +248,83 @@ def latency_report(calls_dir: str, last: int = 5) -> None:
         print("  TTS is slow: make sure the Kokoro container is running and not starved of CPU.")
 
 
+def run_checks(s: Settings, skip: set[str]) -> tuple[dict, bytes | None]:
+    """Every check, timed. Returns ({name: {"ok", "seconds", "error"}}, test audio or None).
+    "error" is the check's own FAIL line, so the dashboard can show what to fix."""
+    results: dict[str, dict] = {}
+    audio = None
+
+    def timed(name: str, fn):
+        out = io.StringIO()
+        t0 = time.perf_counter()
+        with contextlib.redirect_stdout(out):
+            try:
+                value = fn()
+            except Exception as e:  # a check must never stop the others
+                print(f"{FAIL} {e!r}")
+                value = False
+        text = out.getvalue()
+        sys.stdout.write(text)
+        ok = None if value is None else bool(value)
+        fail = next((ln.strip() for ln in text.splitlines() if ln.strip().startswith(FAIL)), None)
+        results[name] = {"ok": ok, "seconds": round(time.perf_counter() - t0, 3), "error": fail if ok is False else None}
+        return value
+
+    with httpx.Client(timeout=30, trust_env=False) as client:
+        if "llm" not in skip:
+            timed("llm", lambda: check_llm(s, client))
+        if "stt" not in skip:
+            timed("stt", lambda: check_stt(s, client))
+        if "tts" not in skip:
+            # check_tts returns the test audio, or None when it failed
+            audio = timed("tts", lambda: check_tts(s, client) or False) or None
+        if "livekit" not in skip:
+            timed("livekit", lambda: check_livekit(client))
+    if "redis" not in skip:
+        timed("redis", lambda: check_redis(s))
+    for name in ("llm", "stt", "tts", "livekit", "redis"):
+        results.setdefault(name, {"ok": None, "seconds": None, "error": None})
+    return results, audio
+
+
+def write_health(path: str, results: dict) -> None:
+    """Save the results for the dashboard, atomically (it may read the file at any moment)."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    body = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()), "services": results}
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(body, f, indent=2)
+    os.replace(tmp, path)
+
+
 def main() -> None:
     load_dotenv()
     p = argparse.ArgumentParser()
     p.add_argument("--play", action="store_true", help="play a test sentence on the speakers")
     p.add_argument("--calls", action="store_true", help="show where the time goes in recent calls")
     p.add_argument("--skip", default="", help="comma-separated services not to check: llm,stt,tts,livekit,redis")
+    p.add_argument("--write", metavar="PATH", help="also save the results as JSON (e.g. data/health.json)")
+    p.add_argument("--watch", type=float, metavar="SECONDS", help="repeat every SECONDS (with --write); never exits")
     args = p.parse_args()
     s = Settings()
     if args.calls:
         latency_report(s.calls_dir)
         return
     skip = {x.strip().lower() for x in args.skip.split(",") if x.strip()}
-    results: dict[str, bool | None] = {}
-    audio = None
-    with httpx.Client(timeout=30, trust_env=False) as client:
-        results["LLM"] = check_llm(s, client) if "llm" not in skip else None
-        results["STT"] = check_stt(s, client) if "stt" not in skip else None
-        if "tts" not in skip:
-            audio = check_tts(s, client)
-            results["TTS"] = audio is not None
-        else:
-            results["TTS"] = None
-        results["LiveKit"] = check_livekit(client) if "livekit" not in skip else None
-    results["Redis"] = check_redis(s) if "redis" not in skip else None
+    if args.watch:
+        if not args.write:
+            p.error("--watch needs --write")
+        while True:  # the agent container runs this next to the worker
+            with contextlib.redirect_stdout(io.StringIO()):
+                found, _ = run_checks(s, skip)
+            write_health(args.write, found)
+            time.sleep(args.watch)
+    found, audio = run_checks(s, skip)
+    if args.write:
+        write_health(args.write, found)
+    labels = {"llm": "LLM", "stt": "STT", "tts": "TTS", "livekit": "LiveKit", "redis": "Redis"}
+    results = {labels[k]: v["ok"] for k, v in found.items()}
     if args.play and audio:
         try:
             play(audio)

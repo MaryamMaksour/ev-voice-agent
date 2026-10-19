@@ -52,6 +52,8 @@ class Settings:
     # seconds to wait for the LLM's first token (LiveKit's default of 10 s is too short at cold start)
     llm_timeout: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT", "30")))
     llm_max_retry: int = field(default_factory=lambda: int(_env("LLM_MAX_RETRY", "1")))
+    # the LLM failed mid-call: the agent says sorry, ends the call and books a callback this far ahead
+    llm_failure_callback_minutes: int = field(default_factory=lambda: int(_env("LLM_FAILURE_CALLBACK_MINUTES", "60")))
 
     turn_detection: str = field(default_factory=lambda: _env("TURN_DETECTION", "model"))
 
@@ -137,6 +139,19 @@ def session_conn_options(settings: Settings):
         stt_conn_options=APIConnectOptions(timeout=30),
         tts_conn_options=APIConnectOptions(timeout=30),
     )
+
+
+def llm_reachable(settings: Settings, timeout: float = 3.0) -> tuple[bool, str]:
+    """Is the LLM server answering? A quick GET /models (vLLM and Ollama both have it): (ok, error)."""
+    import httpx
+
+    try:
+        r = httpx.get(f"{settings.llm_base_url}/models", timeout=timeout, trust_env=False,
+                      headers={"Authorization": f"Bearer {settings.llm_api_key}"})
+        r.raise_for_status()
+        return True, ""
+    except Exception as e:
+        return False, repr(e)[:300]
 
 
 def warm_up_llm(settings: Settings) -> None:

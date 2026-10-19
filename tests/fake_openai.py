@@ -25,23 +25,30 @@ def _chunk(delta: dict, finish: str | None = None, rid: str = "chatcmpl-fake") -
 
 
 class FakeOpenAI:
-    """`policy(messages) -> str | dict` returns text, or {"tool": name, "args": {...}}."""
+    """`policy(messages) -> str | dict` returns text, {"tool": name, "args": {...}}, or
+    {"http_error": 500} to fail the request like a broken LLM server."""
 
     def __init__(self, policy) -> None:
         self.policy = policy
         self.requests: list[dict] = []
         self.app = FastAPI()
         self.app.post("/v1/chat/completions")(self._chat)
+        self.app.get("/v1/models")(self._models)
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             self.port = s.getsockname()[1]
         self.base_url = f"http://127.0.0.1:{self.port}/v1"
         self._server = uvicorn.Server(uvicorn.Config(self.app, port=self.port, log_level="warning"))
 
+    async def _models(self):
+        return JSONResponse({"object": "list", "data": [{"id": "fake", "object": "model"}]})
+
     async def _chat(self, request: Request):
         body = await request.json()
         self.requests.append(body)
         reply = self.policy(body["messages"])
+        if isinstance(reply, dict) and reply.get("http_error"):
+            return JSONResponse({"error": {"message": "the model crashed"}}, status_code=reply["http_error"])
         if not body.get("stream"):  # post-call extraction: one JSON answer
             content = reply if isinstance(reply, str) else json.dumps(reply)
             return JSONResponse({"id": f"chatcmpl-{len(self.requests)}", "object": "chat.completion",

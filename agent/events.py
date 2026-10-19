@@ -53,7 +53,7 @@ class CallEnded:
     ended_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     room: str = ""
     models: dict = field(default_factory=dict)          # llm / stt / tts model names used on this call
-    ended_by: str = ""                                  # agent (end_call) / lead / error / not_reached ...
+    ended_by: str = ""                                  # agent (end_call) / lead / error / not_reached / llm_failure ...
     close_reason: str = ""                              # LiveKit's reason the session closed
     tool_calls: list[dict] = field(default_factory=list)  # every tool the LLM called, with its output
     line: dict | None = None                            # phone line result (3CX); None for browser calls
@@ -63,6 +63,7 @@ class CallEnded:
     settings: dict = field(default_factory=dict)        # temperature, turn detection, VAD, timeouts...
     errors: list[dict] = field(default_factory=list)    # every pipeline error, with its stage (stt/llm/tts...)
     log_files: dict = field(default_factory=dict)       # this call's log files under data/calls/
+    fallback: dict | None = None                        # the LLM failed mid-call: what the agent did (fallback.py)
 
 
 def write_raw(event: CallEnded, calls_dir: str | Path) -> Path:

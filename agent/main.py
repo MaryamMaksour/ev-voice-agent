@@ -52,10 +52,10 @@ from openai import AsyncOpenAI
 from crm import Lead, make_crm
 from crm.audited import AuditedCRM
 
-from . import compliance, telephony
+from . import compliance, fallback, telephony
 from .calllog import CallLogger
-from .config import (Settings, llm_server_info, no_think_body, no_think_prompt_suffix, session_conn_options,
-                     warm_up_llm)
+from .config import (Settings, llm_reachable, llm_server_info, no_think_body, no_think_prompt_suffix,
+                     session_conn_options, warm_up_llm)
 from .events import CallEnded, InProcessBus, PostCallProcessor
 from .logging_setup import bind_call, setup_logging
 from .metrics import CallMetrics
@@ -226,6 +226,7 @@ def outbound_number(ctx: JobContext, lead: Lead) -> str | None:
 
 
 # LiveKit's reason the session closed -> who ended the call (when the agent's end_call didn't)
+# (the agent sets "agent", "transferred", "not_reached" and "llm_failure" itself)
 ENDED_BY = {"participant_disconnected": "lead", "user_initiated": "lead", "error": "error",
             "job_shutdown": "shutdown", "task_completed": "agent"}
 
@@ -350,11 +351,22 @@ async def entrypoint(ctx: JobContext) -> None:
             call_log.close(reason=f"blocked_{decision.rule}")
             ctx.shutdown(reason=f"blocked_{decision.rule}")
             return
+        # never ring a client while the LLM is down: they would hear silence
+        llm_ok, llm_error = await asyncio.to_thread(llm_reachable, settings)
+        if not llm_ok:
+            logger.error("not calling lead %s: the LLM is not answering (%s)", lead_id, llm_error)
+            compliance.record_blocked(settings.blocked_dir, lead_id=lead_id, number=number, rule="llm_down",
+                                      detail=f"the LLM at {settings.llm_base_url} is not answering: {llm_error}",
+                                      source="worker")
+            call_log.close(reason="blocked_llm_down")
+            ctx.shutdown(reason="blocked_llm_down")
+            return
     # looked up in the background so the greeting isn't delayed; read when the call ends
     llm_info_task = asyncio.ensure_future(asyncio.to_thread(llm_server_info, settings))
     versions_task = asyncio.ensure_future(asyncio.to_thread(versions))
 
-    call: dict = {"ended_by": "", "close_reason": "", "tool_calls": [], "line": None, "recording": None}
+    call: dict = {"ended_by": "", "close_reason": "", "tool_calls": [], "line": None, "recording": None,
+                  "fallback": None}
 
     async def transfer_call(reason: str) -> dict:
         if not settings.human_transfer_to:
@@ -415,6 +427,27 @@ async def entrypoint(ctx: JobContext) -> None:
 
     call_log.attach(session)  # timeline, STT/LLM/TTS metrics, tool calls, errors -> data/calls/<call>/
 
+    fallback_tasks: set = set()
+
+    @session.on("error")
+    def _on_session_error(ev) -> None:
+        # the LLM failed after its retries: say sorry, book a callback, end the call (agent/fallback.py)
+        if call["fallback"] is not None or not fallback.is_llm_failure(ev.error):
+            return
+        call["fallback"] = {"reason": "llm", "started": True}
+
+        async def run() -> None:
+            call["fallback"] = await fallback.handle_llm_failure(
+                say=lambda text: session.say(text, allow_interruptions=False),
+                crm=crm, lead_id=lead_id, callback_minutes=settings.llm_failure_callback_minutes)
+            call["ended_by"] = "llm_failure"
+            call_log.event("llm_failure", **call["fallback"])
+            session.shutdown(drain=True)
+
+        task = asyncio.ensure_future(run())
+        fallback_tasks.add(task)
+        task.add_done_callback(fallback_tasks.discard)
+
     @session.on("function_tools_executed")
     def _on_tools(ev: FunctionToolsExecutedEvent) -> None:
         # every tool the LLM called, with what it returned (the CRM writes alone are in tools.actions)
@@ -464,6 +497,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 settings=call_settings(settings, vad),
                 errors=call_log.errors,
                 log_files=call_log.files(),
+                fallback=call["fallback"],
             )
         )
         logger.info("latency summary: %s", call_metrics.summary())

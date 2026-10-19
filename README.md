@@ -235,6 +235,7 @@ python -m agent.dial --lead L003 --number +9715...   # ring your own number to t
 | `MAX_CALLS_PER_DAY`, `MAX_CALLS_PER_WEEK` | 1, 2 | Phone calls per lead per day (calendar day) and per 7 days. 0 = no limit |
 | `BLOCKED_STATUSES` | `not_interested,do_not_call,wrong_number` | Never call leads with these CRM statuses |
 | `CALL_HOURS` | empty (24/7) | e.g. `09:00-18:00`: only call in this window |
+| `LLM_FAILURE_CALLBACK_MINUTES` | 60 | The LLM failed mid-call: the agent says sorry, ends the call and books a callback this far ahead |
 | `BLOCKED_DIR` | `data/blocked` | Dials the rules stopped, one line each (see [docs/call-record.md](docs/call-record.md)) |
 | `LOGS_DIR`, `LOG_LEVEL`, `LOG_KEEP_DAYS` | `logs`, INFO, 30 | Service logs |
 | `LOG_LLM_MESSAGES` | 1 | Save the full messages of each LLM request |
