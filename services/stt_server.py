@@ -35,6 +35,34 @@ from fastapi.responses import PlainTextResponse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stt")
 
+
+def _json_log_file() -> logging.Logger | None:
+    """LOGS_DIR set: one JSON line per transcription in LOGS_DIR/stt/<date>.jsonl (same layout as the agent)."""
+    folder = os.getenv("LOGS_DIR")
+    if not folder:
+        return None
+    import json
+    from datetime import datetime, timezone
+
+    class Daily(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            now = datetime.now(timezone.utc)
+            path = Path(folder) / "stt" / f"{now:%Y-%m-%d}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = {"ts": now.isoformat(timespec="milliseconds"), "level": record.levelname, "logger": "stt",
+                    "service": "stt", "msg": record.getMessage(), **getattr(record, "data", {})}
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+    log = logging.getLogger("stt.requests")
+    log.addHandler(Daily())
+    log.propagate = False
+    log.setLevel(logging.INFO)
+    return log
+
+
+request_log = _json_log_file()
+
 ENGINE = os.getenv("STT_ENGINE", "whisper").lower()
 # concurrent transcriptions per server
 MAX_PARALLEL = int(os.getenv("STT_MAX_PARALLEL", os.getenv("WHISPER_MAX_PARALLEL", "4")))
@@ -121,6 +149,14 @@ class ParakeetEngine:
         return stream.result.text.strip()
 
 
+def _wav_seconds(audio: bytes) -> float | None:
+    try:
+        with wave.open(io.BytesIO(audio)) as w:
+            return round(w.getnframes() / w.getframerate(), 2)
+    except Exception:
+        return None
+
+
 def load_engine():
     if ENGINE == "parakeet":
         return ParakeetEngine()
@@ -157,7 +193,12 @@ async def transcriptions(
     t0 = time.perf_counter()
     async with _slots:
         text = await asyncio.to_thread(engine.transcribe, audio, language, prompt)
-    logger.info("transcribed %d bytes in %.2fs: %r", len(audio), time.perf_counter() - t0, text[:80])
+    seconds = time.perf_counter() - t0
+    logger.info("transcribed %d bytes in %.2fs: %r", len(audio), seconds, text[:80])
+    if request_log is not None:
+        request_log.info("transcribed", extra={"data": {
+            "engine": ENGINE, "model": engine.name, "bytes": len(audio), "audio_seconds": _wav_seconds(audio),
+            "seconds": round(seconds, 3), "language": language, "chars": len(text), "text": text}})
     if response_format == "text":
         return PlainTextResponse(text)
     if response_format == "verbose_json":

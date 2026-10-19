@@ -28,7 +28,7 @@ def policy(messages):
 
 
 async def _session(fake, crm, lead_id="L001"):
-    model = "qwen3:14b"
+    model = "qwen3.5-9b"
     llm = openai.LLM(base_url=fake.base_url, api_key="x", model=model, extra_body=no_think_body(model))
     lead = await crm.get_lead(lead_id)
     tools = LeadTools(crm, lead_id)
@@ -49,7 +49,7 @@ async def test_tool_call_reaches_crm(crm):
     assert tools.actions[0]["action"] == "update_lead"
 
     req = fake.requests[-1]
-    assert req["think"] is False  # Ollama: thinking off
+    assert req["chat_template_kwargs"] == {"enable_thinking": False}  # vLLM: thinking off
     tool_names = {t["function"]["name"] for t in req["tools"]}
     assert {"update_lead", "schedule_callback", "mark_do_not_call", "end_call"} <= tool_names
     assert "Sarah Johnson" in req["messages"][0]["content"]  # lead context in the system prompt

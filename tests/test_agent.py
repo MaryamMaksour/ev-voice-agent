@@ -29,11 +29,12 @@ def test_tool_schemas_are_strict_openai_compatible():
 
 def test_prompt_contains_lead_context():
     p = build_system_prompt(LEAD, company="Horizon", agent_name="Alex", tz="UTC", now=datetime(2026, 10, 12, 9))
-    assert "Sarah" in p and "Marina Heights" in p and "800,000 USD" in p and "/no_think" in p
+    assert "Sarah" in p and "Marina Heights" in p and "800,000 USD" in p and "/no_think" not in p
 
 
 def test_no_think_only_for_qwen3():
-    assert no_think_body("qwen3:14b") == {"think": False} and no_think_body("Qwen3:8B")
+    off = {"chat_template_kwargs": {"enable_thinking": False}}
+    assert no_think_body("qwen3.5-9b") == off and no_think_body("Qwen/Qwen3.5-9B") == off
     assert no_think_body("llama3.1") == {}
 
 

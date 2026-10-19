@@ -1,5 +1,7 @@
-"""All runtime settings come from the environment (.env). The LLM is served by Ollama
-everywhere (laptop, RunPod, EC2); only the URLs and the model tag change."""
+"""All runtime settings come from the environment (.env).
+
+The LLM is Qwen3.5-9B served by vLLM (OpenAI-compatible API) on the company GPU server;
+only the URLs change between machines."""
 
 from __future__ import annotations
 
@@ -17,9 +19,12 @@ class Settings:
     agent_name: str = field(default_factory=lambda: _env("AGENT_PERSONA_NAME", "Alex"))
     timezone: str = field(default_factory=lambda: _env("CALL_TIMEZONE", "UTC"))
 
-    llm_base_url: str = field(default_factory=lambda: _env("LLM_BASE_URL", "http://localhost:11434/v1"))
-    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "qwen3:8b"))
-    llm_api_key: str = field(default_factory=lambda: _env("LLM_API_KEY", "ollama"))
+    # vLLM: LLM_MODEL must equal vLLM's --served-model-name
+    llm_base_url: str = field(default_factory=lambda: _env("LLM_BASE_URL", "http://localhost:8000/v1"))
+    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "qwen3.5-9b"))
+    # empty = vLLM runs without a key; the OpenAI client still needs some value
+    llm_api_key: str = field(default_factory=lambda: _env("LLM_API_KEY", "") or "not-needed")
+    llm_temperature: float = field(default_factory=lambda: float(_env("LLM_TEMPERATURE", "0.3")))
 
     stt_base_url: str = field(default_factory=lambda: _env("STT_BASE_URL", "http://localhost:8001/v1"))
     stt_model: str = field(default_factory=lambda: _env("STT_MODEL", "whisper-1"))
@@ -28,14 +33,23 @@ class Settings:
     tts_model: str = field(default_factory=lambda: _env("TTS_MODEL", "kokoro"))
     tts_voice: str = field(default_factory=lambda: _env("TTS_VOICE", "af_heart"))
 
-    # a laptop running Qwen3 partly on CPU can take >10 s (LiveKit's default) to answer
-    llm_timeout: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT", "60")))
+    # seconds to wait for the LLM's first token (LiveKit's default of 10 s is too short at cold start)
+    llm_timeout: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT", "30")))
     llm_max_retry: int = field(default_factory=lambda: int(_env("LLM_MAX_RETRY", "1")))
 
     turn_detection: str = field(default_factory=lambda: _env("TURN_DETECTION", "model"))
 
     default_lead_id: str = field(default_factory=lambda: _env("DEFAULT_LEAD_ID", "L001"))
     calls_dir: str = field(default_factory=lambda: _env("CALLS_DIR", "data/calls"))
+
+    # --- logs: JSON lines per service in LOGS_DIR/<service>/<date>.jsonl (see agent/logging_setup.py)
+    logs_dir: str = field(default_factory=lambda: _env("LOGS_DIR", "logs"))
+    log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
+    # save every LLM request's full messages in data/calls/<call>/llm.jsonl (0 = only replies and numbers)
+    log_llm_messages: bool = field(default_factory=lambda: _env("LOG_LLM_MESSAGES", "1") in ("1", "true", "yes"))
+
+    # --- post-call work: Celery on Redis. Empty = run it inside the agent process (laptop, tests)
+    redis_url: str = field(default_factory=lambda: _env("REDIS_URL", ""))
 
     # --- phone line: 3CX through a LiveKit SIP outbound trunk (empty = browser / console calls only)
     sip_outbound_trunk_id: str = field(default_factory=lambda: _env("SIP_OUTBOUND_TRUNK_ID", ""))
@@ -45,7 +59,10 @@ class Settings:
 
     # --- recording with LiveKit Egress (needs the egress service; see README)
     recording_enabled: bool = field(default_factory=lambda: _env("RECORDING_ENABLED", "0") in ("1", "true", "yes"))
-    recording_filepath: str = field(default_factory=lambda: _env("RECORDING_FILEPATH", "recordings/{room}.ogg"))
+    # path as the egress container sees it; {room} and {lead} are filled in
+    recording_filepath: str = field(default_factory=lambda: _env("RECORDING_FILEPATH", "/out/{room}.ogg"))
+    # the same folder as this machine sees it, to link the file into the call's log folder
+    recordings_dir: str = field(default_factory=lambda: _env("RECORDINGS_DIR", "data/recordings"))
     recording_s3_bucket: str = field(default_factory=lambda: _env("RECORDING_S3_BUCKET", ""))
     recording_s3_region: str = field(default_factory=lambda: _env("RECORDING_S3_REGION", ""))
 
@@ -58,13 +75,13 @@ class Settings:
 
 
 def no_think_body(model: str) -> dict:
-    """Qwen3 'thinking' adds seconds of latency; switch it off for voice turns.
+    """Qwen3 / Qwen3.5 'thinking' adds seconds of latency; switch it off for voice turns.
 
-    Ollama reads the top-level "think" flag. As belt and braces the system prompt also
-    ends with /no_think (prompts.py) and any <think> text is stripped before TTS
+    vLLM passes chat_template_kwargs to the model's chat template, which then skips the
+    thinking block. As a safety net any <think> text is still stripped before TTS
     (main.py), so a model that thinks anyway is never read aloud."""
     if "qwen3" in model.lower():
-        return {"think": False}
+        return {"chat_template_kwargs": {"enable_thinking": False}}
     return {}
 
 
@@ -81,7 +98,7 @@ def session_conn_options(settings: Settings):
 
 
 def warm_up_llm(settings: Settings) -> None:
-    """Ask the LLM for one token so Ollama loads the model before the first call."""
+    """Ask vLLM for one token so CUDA graphs and the prefix cache are warm before the first call."""
     import httpx
 
     try:
@@ -89,8 +106,24 @@ def warm_up_llm(settings: Settings) -> None:
             f"{settings.llm_base_url}/chat/completions",
             headers={"Authorization": f"Bearer {settings.llm_api_key}"},
             json={"model": settings.llm_model, "max_tokens": 1,
-                  "messages": [{"role": "user", "content": "hi /no_think"}], **no_think_body(settings.llm_model)},
-            timeout=300,
+                  "messages": [{"role": "user", "content": "hi"}], **no_think_body(settings.llm_model)},
+            timeout=120,
         )
     except Exception:
         pass  # warm-up is best effort; the call itself will report real errors
+
+
+def llm_server_info(settings: Settings) -> dict:
+    """What vLLM is serving (model id, max context): saved in every call record. Best effort."""
+    import httpx
+
+    try:
+        r = httpx.get(f"{settings.llm_base_url}/models", timeout=3,
+                      headers={"Authorization": f"Bearer {settings.llm_api_key}"})
+        for m in r.json().get("data", []):
+            if m.get("id") == settings.llm_model:
+                return {"served_by": "vllm", "model": m.get("id"), "root": m.get("root"),
+                        "max_model_len": m.get("max_model_len")}
+    except Exception:
+        pass
+    return {"served_by": "vllm", "model": settings.llm_model}

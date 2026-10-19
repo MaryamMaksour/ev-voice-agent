@@ -1,9 +1,21 @@
-# Self-hosted LiveKit server for EC2 (single node: no Redis needed).
+# Self-hosted LiveKit server on the company GPU server.
 # API keys come from the LIVEKIT_KEYS env var set in docker-compose.yml.
 port: 7880
+bind_addresses:
+  - 0.0.0.0
 rtc:
   tcp_port: 7881
-  udp_port: 7882          # one UDP port for all media -> one firewall rule
-  use_external_ip: true   # advertise the instance's public IP to browsers
+  udp_port: 7882          # one UDP port for all call audio -> one firewall rule
+  # LAN: advertise the server's LAN address. Set node_ip if the server has several addresses,
+  # or use_external_ip: true if callers come over the internet.
+  use_external_ip: false
+  # node_ip: 192.168.1.50
+# Redis: Egress (call recording) and, later, the SIP service for 3CX talk to LiveKit through it
+redis:
+  address: 127.0.0.1:6379
+room:
+  empty_timeout: 60
+  departure_timeout: 10
 logging:
   level: info
+  json: true

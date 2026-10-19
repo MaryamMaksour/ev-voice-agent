@@ -1,12 +1,9 @@
-# Laptop side (Plan A0 with Ollama, or Plan B with models on a RunPod pod).
+# Laptop-only stack, no GPU: LiveKit + Redis + STT (Parakeet, CPU) + TTS (Kokoro, CPU) on the laptop,
+# the LLM is the vLLM server on the company GPU server (LLM_BASE_URL=http://<server-ip>:8000/v1).
 #   docker compose -f services/docker-compose.local.yml --env-file .env up -d
-# The agent itself runs on the laptop with `python -m agent.main dev`.
-#
-# Laptop: stt + tts run here on the CPU, the LLM is Ollama installed natively
-#          (best on Windows/macOS: it uses the GPU directly).
-#          No native install? Add `--profile ollama` to run Ollama in Docker instead.
-# RunPod : only livekit + tts here; STT and LLM URLs in .env point at the pod:
-#   docker compose -f services/docker-compose.local.yml up -d livekit tts
+#   python -m agent.main dev            # the agent, on the laptop
+#   python -m agent.talk --lead L003    # call it
+# The normal setup is everything on the GPU server: services/docker-compose.yml.
 
 services:
   livekit:
@@ -47,22 +44,11 @@ services:
     ports:
       - "8880:8880"
 
-  ollama:
-    profiles: ["ollama"]
-    image: ollama/ollama:0.35.1
-    environment:
-      OLLAMA_CONTEXT_LENGTH: "8192"
-      OLLAMA_KEEP_ALIVE: "-1"
-    volumes:
-      - ollama:/root/.ollama
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "11434:11434"
-    # uncomment on Linux with an NVIDIA GPU + nvidia-container-toolkit
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+      - "127.0.0.1:6379:6379"
 
 volumes:
   hf-cache:
-  ollama:

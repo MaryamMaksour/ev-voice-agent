@@ -2,7 +2,9 @@
 
     python -m agent.main download-files   # one-time: VAD + turn-detector weights
     python -m agent.main dev              # connect to LiveKit, wait for calls
-    python -m agent.main console          # talk to it in the terminal (no LiveKit server)
+    python -m agent.main start            # same, production mode (docker: agent service)
+    python -m agent.talk --lead L003      # talk to it by voice from a terminal, through LiveKit
+    python -m agent.main console          # talk to it in the terminal without a LiveKit server
     python -m agent.dial --lead L003      # phone the lead through 3CX (SIP_OUTBOUND_TRUNK_ID)
 
 Which lead is called: job metadata {"lead_id": "L003"} (explicit dispatch), else a room
@@ -12,6 +14,7 @@ Phone calls: job or room metadata {"dial": true} (the lead's CRM number) or {"ph
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -47,12 +50,15 @@ from livekit.plugins.turn_detector.english import EnglishModel
 from openai import AsyncOpenAI
 
 from crm import Lead, make_crm
+from crm.audited import AuditedCRM
 
 from . import telephony
-from .config import Settings, no_think_body, session_conn_options, warm_up_llm
-from .events import CallEnded, InProcessBus, PostCallProcessor
+from .calllog import CallLogger
+from .config import Settings, llm_server_info, no_think_body, session_conn_options, warm_up_llm
+from .events import CallEnded, CeleryBus, InProcessBus, PostCallProcessor
+from .logging_setup import bind_call, setup_logging
 from .metrics import CallMetrics
-from .prompts import build_system_prompt, greeting_instructions
+from .prompts import build_system_prompt, greeting_instructions, prompt_version
 from .tools import LeadTools
 
 load_dotenv()
@@ -64,7 +70,8 @@ Interest = Literal["hot", "warm", "cold"]
 
 
 class LeadQualifierAgent(Agent):
-    def __init__(self, lead: Lead, tools: LeadTools, settings: Settings, recorded: bool = False) -> None:
+    def __init__(self, lead: Lead, tools: LeadTools, settings: Settings, recorded: bool = False,
+                 call_log: CallLogger | None = None) -> None:
         super().__init__(
             instructions=build_system_prompt(
                 lead,
@@ -84,6 +91,7 @@ class LeadQualifierAgent(Agent):
         self._lead_tools = tools
         self._settings = settings
         self._recorded = recorded
+        self._call_log = call_log
 
     async def on_enter(self) -> None:
         self.session.generate_reply(
@@ -94,19 +102,43 @@ class LeadQualifierAgent(Agent):
         )
 
     async def llm_node(self, chat_ctx: ChatContext, tools: list[lk_llm.Tool], model_settings: ModelSettings):
-        """Default LLM step, minus any <think>...</think> text, so it is never spoken."""
+        """Default LLM step, minus any <think>...</think> text, so it is never spoken.
+
+        Every request is also saved to data/calls/<call>/llm.jsonl: the messages sent, the reply,
+        tool calls, time to first token, and (joined later) LiveKit's token counts."""
         state = ThinkingTokenFilter()
-        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
-            if isinstance(chunk, str):
-                chunk = strip_thinking_tokens(chunk, state) or ""
-                if not chunk:
-                    continue
-            elif isinstance(chunk, lk_llm.ChatChunk) and chunk.delta and chunk.delta.content:
-                chunk.delta.content = strip_thinking_tokens(chunk.delta.content, state) or ""
-            yield chunk
-        tail = strip_thinking_tokens(None, state, final=True)
-        if tail:
-            yield tail
+        log = self._call_log
+        rec = log.llm_started(chat_ctx=chat_ctx, tools=tools) if log else None
+        cancelled, error = True, None
+        try:
+            async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+                if isinstance(chunk, str):
+                    raw = chunk
+                    chunk = strip_thinking_tokens(chunk, state) or ""
+                    if rec is not None:
+                        rec["thinking_removed_chars"] += len(raw) - len(chunk)
+                    if not chunk:
+                        continue
+                elif isinstance(chunk, lk_llm.ChatChunk) and chunk.delta and chunk.delta.content:
+                    raw = chunk.delta.content
+                    chunk.delta.content = strip_thinking_tokens(chunk.delta.content, state) or ""
+                    if rec is not None:
+                        rec["thinking_removed_chars"] += len(raw) - len(chunk.delta.content)
+                if rec is not None:
+                    log.llm_chunk(rec, chunk)
+                yield chunk
+            tail = strip_thinking_tokens(None, state, final=True)
+            if tail:
+                if rec is not None:
+                    log.llm_chunk(rec, tail)
+                yield tail
+            cancelled = False
+        except Exception as e:
+            cancelled, error = False, e
+            raise
+        finally:  # also runs when the caller interrupts and LiveKit closes this stream
+            if rec is not None:
+                log.llm_finished(rec, cancelled=cancelled, error=error)
 
     @function_tool
     async def update_lead(
@@ -211,7 +243,64 @@ server = AgentServer(
     # accept many calls per worker during load tests; tune per instance size
     load_threshold=float(os.getenv("AGENT_LOAD_THRESHOLD", "0.9")),
     num_idle_processes=int(os.getenv("AGENT_IDLE_PROCESSES", "3")),
+    # LiveKit is self-hosted on the LAN: talk to it directly. LiveKit would otherwise send its
+    # connection through HTTPS_PROXY (it ignores NO_PROXY), which breaks behind a company proxy.
+    http_proxy=os.getenv("LIVEKIT_HTTP_PROXY") or None,
 )
+
+
+def versions() -> dict:
+    """Which code, prompt and libraries ran this call (saved in every call record)."""
+    import importlib.metadata as md
+    import subprocess
+
+    sha = os.getenv("GIT_SHA", "")
+    if not sha:
+        try:
+            sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                                 timeout=2, cwd=os.path.dirname(__file__)).stdout.strip()
+        except Exception:
+            sha = ""
+
+    def ver(pkg: str) -> str | None:
+        try:
+            return md.version(pkg)
+        except md.PackageNotFoundError:
+            return None
+
+    return {"code": sha or None, "prompt": prompt_version(), "livekit_agents": ver("livekit-agents"),
+            "livekit_plugins_openai": ver("livekit-plugins-openai"), "voice_agent": ver("voice-agent")}
+
+
+def _result(task: asyncio.Future, default):
+    """A background lookup's result, or `default` if it isn't done or failed."""
+    if task.done() and not task.cancelled() and task.exception() is None:
+        return task.result()
+    return default
+
+
+def call_settings(settings: Settings, vad) -> dict:
+    """The knobs that change how a call behaves, saved with the call so runs can be compared."""
+    vad_opts = getattr(vad, "_opts", None)
+    return {
+        "llm_temperature": settings.llm_temperature, "llm_timeout": settings.llm_timeout,
+        "llm_max_retry": settings.llm_max_retry, "thinking": False,
+        "turn_detection": settings.turn_detection, "interruption": "vad", "preemptive_generation": True,
+        "vad": {k: getattr(vad_opts, k, None) for k in ("min_speech_duration", "min_silence_duration",
+                                                         "activation_threshold", "prefix_padding_duration")}
+        if vad_opts else None,
+        "stt_language": "en", "tts_format": "mp3", "recording": settings.recording_enabled,
+        "post_call": "celery" if settings.redis_url else "in_process",
+    }
+
+
+def make_bus(settings: Settings, crm, llm_client: AsyncOpenAI):
+    """Celery (REDIS_URL set) or in-process post-call work; Celery falls back to in-process if Redis is down."""
+    in_process = InProcessBus(PostCallProcessor(crm, llm_client, settings.llm_model, settings.calls_dir,
+                                                logs_dir=settings.logs_dir, recordings_dir=settings.recordings_dir))
+    if settings.redis_url:
+        return CeleryBus(settings.calls_dir, fallback=in_process)
+    return in_process
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -226,15 +315,32 @@ server.setup_fnc = prewarm
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
     settings = Settings()
-    crm = make_crm()
+    started_at = datetime.now(timezone.utc).isoformat()
     lead_id = resolve_lead_id(ctx, settings.default_lead_id)
-    lead = await crm.get_lead(lead_id)  # "check the lead" before saying a word
-    ctx.log_context_fields = {"lead_id": lead_id, "room": ctx.room.name}
+    call_id = f"{ctx.room.name}-{started_at[:19].replace(':', '')}"
+    # every log line of this call carries these fields (logs/agent/<date>.jsonl)
+    ctx.log_context_fields = {"call_id": call_id, "lead_id": lead_id, "room": ctx.room.name}
+    bind_call(call_id=call_id, lead_id=lead_id, room=ctx.room.name)
+    call_log = CallLogger(settings.calls_dir, call_id, log_llm_messages=settings.log_llm_messages)
+    # every CRM write during the call is saved with the lead before and after (crm_changes.jsonl)
+    crm = AuditedCRM(make_crm(), call_log.crm_change, source="call")
+    try:
+        lead = await crm.get_lead(lead_id)  # "check the lead" before saying a word
+    except Exception as e:
+        call_log.event("error", stage="crm", error=repr(e), at_start=True)
+        call_log.close(reason="lead_lookup_failed")
+        raise
+    call_log.event("call_started", lead_id=lead_id, lead_name=lead.name, lead_status=lead.status.value,
+                   room=ctx.room.name, job_id=getattr(ctx.job, "id", None))
     logger.info("calling lead %s (%s), status=%s", lead.id, lead.name, lead.status.value)
     if lead.do_not_call:
         logger.warning("lead %s is on the do-not-call list; not starting the call", lead_id)
+        call_log.close(reason="do_not_call")
         ctx.shutdown(reason="do_not_call")
         return
+    # looked up in the background so the greeting isn't delayed; read when the call ends
+    llm_info_task = asyncio.ensure_future(asyncio.to_thread(llm_server_info, settings))
+    versions_task = asyncio.ensure_future(asyncio.to_thread(versions))
 
     call: dict = {"ended_by": "", "close_reason": "", "tool_calls": [], "line": None, "recording": None}
 
@@ -253,7 +359,6 @@ async def entrypoint(ctx: JobContext) -> None:
 
     tools = LeadTools(crm, lead_id, tz=settings.timezone, transfer=transfer_call)
     call_metrics = CallMetrics()
-    started_at = datetime.now(timezone.utc).isoformat()
 
     session = AgentSession(
         conn_options=session_conn_options(settings),
@@ -271,7 +376,7 @@ async def entrypoint(ctx: JobContext) -> None:
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
             model=settings.llm_model,
-            temperature=0.3,
+            temperature=settings.llm_temperature,
             extra_body=no_think_body(settings.llm_model),
         ),
         tts=openai.TTS(
@@ -296,6 +401,8 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_metrics(ev: MetricsCollectedEvent) -> None:
         call_metrics.on_metrics(ev.metrics)
 
+    call_log.attach(session)  # timeline, STT/LLM/TTS metrics, tool calls, errors -> data/calls/<call>/
+
     @session.on("function_tools_executed")
     def _on_tools(ev: FunctionToolsExecutedEvent) -> None:
         # every tool the LLM called, with what it returned (the CRM writes alone are in tools.actions)
@@ -310,7 +417,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 call["ended_by"] = "agent"
 
     llm_client = AsyncOpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
-    bus = InProcessBus(PostCallProcessor(crm, llm_client, settings.llm_model, settings.calls_dir))
+    bus = make_bus(settings, crm.inner, llm_client)
+    vad = ctx.proc.userdata["vad"]
 
     published = False
 
@@ -319,23 +427,31 @@ async def entrypoint(ctx: JobContext) -> None:
         if published:
             return
         published = True
+        ended_by = call["ended_by"] or ENDED_BY.get(call["close_reason"], call["close_reason"])
+        call_log.close(ended_by=ended_by, close_reason=call["close_reason"])
+        llm_info = _result(llm_info_task, {"served_by": "vllm", "model": settings.llm_model})
         bus.publish(
             CallEnded(
-                call_id=f"{ctx.room.name}-{started_at[:19].replace(':', '')}",
+                call_id=call_id,
                 lead_id=lead_id,
                 transcript=transcript_from(session),
                 actions=tools.actions,
-                metrics=call_metrics.summary(),
+                metrics={**call_metrics.summary(), **call_log.summary()},
                 started_at=started_at,
                 room=ctx.room.name,
                 models={"llm": settings.llm_model, "stt": settings.stt_model, "tts": settings.tts_model,
-                        "tts_voice": settings.tts_voice},
-                ended_by=call["ended_by"] or ENDED_BY.get(call["close_reason"], call["close_reason"]),
+                        "tts_voice": settings.tts_voice, "llm_server": llm_info,
+                        "served_by": llm_info.get("served_by")},
+                ended_by=ended_by,
                 close_reason=call["close_reason"],
                 tool_calls=call["tool_calls"],
                 line=call["line"],
                 recording=call["recording"],
                 transfer=tools.transfer,
+                versions=_result(versions_task, {}),
+                settings=call_settings(settings, vad),
+                errors=call_log.errors,
+                log_files=call_log.files(),
             )
         )
         logger.info("latency summary: %s", call_metrics.summary())
@@ -377,8 +493,13 @@ async def entrypoint(ctx: JobContext) -> None:
             filepath=settings.recording_filepath.format(room=ctx.room.name, lead=lead_id))
 
     recorded = bool(call["recording"] and call["recording"].get("ok"))
-    await session.start(agent=LeadQualifierAgent(lead, tools, settings, recorded=recorded), room=ctx.room)
+    call_log.event("recording", **(call["recording"] or {"ok": False, "error": "RECORDING_ENABLED=0"}))
+    await session.start(agent=LeadQualifierAgent(lead, tools, settings, recorded=recorded, call_log=call_log),
+                        room=ctx.room)
 
 
 if __name__ == "__main__":
+    # JSON log lines for the worker and every call: logs/agent/<date>.jsonl. Call processes forward
+    # their lines here (tagged with call_id by ctx.log_context_fields), so only this process writes.
+    setup_logging("agent")
     cli.run_app(server)
