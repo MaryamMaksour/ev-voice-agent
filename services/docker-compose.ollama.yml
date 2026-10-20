@@ -1,0 +1,26 @@
+# Server option: use the Ollama already installed on the server instead of vLLM.
+#
+# Turn it on with one line in .env:   SERVER_LLM=ollama
+# deploy/deploy.sh then adds this file on top of docker-compose.yml. By hand:
+#   docker compose -f services/docker-compose.yml -f services/docker-compose.ollama.yml --env-file .env up -d
+#
+# What it changes:
+#  - vLLM is not started (no model download, no GPU memory taken from Ollama)
+#  - the agent uses LLM_BASE_URL / LLM_MODEL from .env (default: Ollama on this server, qwen3.5:9b)
+#  - the agent no longer waits for vLLM before starting
+# Good for tests and low volume. For many calls at the same time, use vLLM (remove SERVER_LLM or set it to vllm).
+
+services:
+  vllm:
+    profiles: [vllm]    # only started when asked for by name
+
+  agent:
+    environment:
+      LLM_BACKEND: ollama
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://127.0.0.1:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen3.5:9b}
+    depends_on: !override
+      stt: {condition: service_healthy}
+      tts: {condition: service_started}
+      livekit: {condition: service_started}
+      redis: {condition: service_healthy}

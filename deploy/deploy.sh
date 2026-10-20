@@ -16,7 +16,15 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-COMPOSE=(docker compose -f services/docker-compose.yml --env-file .env)
+COMPOSE=(docker compose -f services/docker-compose.yml)
+# SERVER_LLM=ollama in .env: use the server's own Ollama instead of vLLM (services/docker-compose.ollama.yml)
+SERVER_LLM=$(grep -E '^SERVER_LLM=' .env | tail -n 1 | cut -d= -f2- | tr -d '[:space:]"' || true)
+case "${SERVER_LLM:-vllm}" in
+  ollama) COMPOSE+=(-f services/docker-compose.ollama.yml); echo "==> LLM: Ollama on this server" ;;
+  vllm)   echo "==> LLM: vLLM" ;;
+  *)      echo "SERVER_LLM in .env must be vllm or ollama, not '$SERVER_LLM'" >&2; exit 1 ;;
+esac
+COMPOSE+=(--env-file .env)
 HEALTH_TRIES="${HEALTH_TRIES:-18}"     # x 10 s = 3 minutes for the agent to come up
 
 PREV=$(git rev-parse HEAD)
