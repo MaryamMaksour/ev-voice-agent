@@ -60,6 +60,8 @@ jobs:
         run: docker compose -f services/docker-compose.yml --env-file .env config --quiet
       - name: Server stack with the server's Ollama instead of vLLM (SERVER_LLM=ollama)
         run: docker compose -f services/docker-compose.yml -f services/docker-compose.ollama.yml --env-file .env config --quiet
+      - name: Server stack without a GPU (SERVER_LLM=ollama, SERVER_GPU=0)
+        run: docker compose -f services/docker-compose.yml -f services/docker-compose.ollama.yml -f services/docker-compose.cpu.yml --env-file .env config --quiet
       - name: Laptop test stack (LiveKit, STT, TTS, optional Ollama)
         run: docker compose -f services/docker-compose.local.yml --env-file .env --profile ollama config --quiet
       - name: Deploy script syntax

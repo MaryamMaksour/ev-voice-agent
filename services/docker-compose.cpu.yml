@@ -1,0 +1,31 @@
+# Server option: run without a GPU (tests only: replies are slow).
+#
+# Turn it on in .env:   SERVER_GPU=0   (needs SERVER_LLM=ollama too: vLLM can't run without a GPU)
+# deploy/deploy.sh then adds this file on top of docker-compose.yml and docker-compose.ollama.yml.
+#
+# What it changes:
+#  - STT: Parakeet on the CPU (as on a laptop) instead of faster-whisper on the GPU
+#  - TTS: the CPU build of Kokoro
+#  - nothing asks Docker for a GPU, so the NVIDIA Container Toolkit isn't needed
+# Remove SERVER_GPU (or set it to 1) when the GPU works again.
+
+services:
+  vllm:
+    profiles: [vllm]
+
+  stt:
+    deploy: !reset null
+    build:
+      args:
+        BASE: python:3.11-slim
+    environment:
+      STT_ENGINE: parakeet
+      PARAKEET_THREADS: ${PARAKEET_THREADS:-8}
+      WHISPER_MODEL: small.en
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: int8
+      STT_MAX_PARALLEL: "2"
+
+  tts:
+    deploy: !reset null
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.8.2

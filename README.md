@@ -105,6 +105,8 @@ By default the server uses its own vLLM. It ignores the laptop's `LLM_*` lines i
 
 **Ollama already installed on the server?** Add `SERVER_LLM=ollama` to `.env` and run `deploy.sh` again. vLLM is then not started (no 19 GB download), and the agent uses `LLM_BASE_URL` / `LLM_MODEL` from `.env` (default: `http://localhost:11434/v1`, `qwen3.5:9b`). Check the model is there with `ollama list`. Fine for tests and a few calls at a time; for many calls at once, go back to vLLM by removing the line. Running `docker compose` by hand in this mode? Add `-f services/docker-compose.ollama.yml` after `-f services/docker-compose.yml`, or vLLM starts too.
 
+**GPU not working yet?** For a test, add `SERVER_GPU=0` as well (it needs `SERVER_LLM=ollama`), and `LLM_TIMEOUT=120`. Speech-to-text then runs Parakeet on the CPU and text-to-speech the CPU build of Kokoro, so the NVIDIA Container Toolkit isn't needed. Replies are slow (several seconds or more): good for checking that everything connects, not for real calls. Remove the line when the GPU works.
+
 Seed the demo CRM (20 leads, L001–L020) once, inside the agent container:
 ```bash
 docker compose -f services/docker-compose.yml --env-file .env exec agent python -m crm.sqlite_adapter --seed
@@ -229,6 +231,7 @@ python -m agent.dial --lead L003 --number +9715...   # ring your own number to t
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | | The LiveKit server and its keys |
 | `LLM_BASE_URL`, `LLM_MODEL` | Ollama, `qwen3.5:9b` | The LLM the laptop uses. The server uses its own vLLM, unless `SERVER_LLM=ollama`. |
 | `SERVER_LLM` | `vllm` | `ollama` = the server uses the Ollama installed on it (and `LLM_BASE_URL` / `LLM_MODEL`) instead of starting vLLM |
+| `SERVER_GPU` | `1` | `0` = no GPU on the server (tests only): STT and TTS run on the CPU. Needs `SERVER_LLM=ollama` |
 | `LLM_BACKEND` | from the URL | `vllm` or `ollama`; port 11434 means Ollama. Set it only if Ollama is on another port. |
 | `VLLM_SERVED_NAME`, `VLLM_MODEL` | `qwen3.5-9b`, `Qwen/Qwen3.5-9B` | vLLM's model name, and the Hugging Face model it serves |
 | `LLM_TEMPERATURE`, `LLM_TIMEOUT` | 0.3, 30 | |
