@@ -107,6 +107,8 @@ By default the server uses its own vLLM. It ignores the laptop's `LLM_*` lines i
 
 **GPU not working yet?** For a test, add `SERVER_GPU=0` as well (it needs `SERVER_LLM=ollama`), and `LLM_TIMEOUT=120`. Speech-to-text then runs Parakeet on the CPU and text-to-speech the CPU build of Kokoro, so the NVIDIA Container Toolkit isn't needed. Replies are slow (several seconds or more): good for checking that everything connects, not for real calls. Remove the line when the GPU works.
 
+The easiest way to run that test is one command, which sets those `.env` lines, starts everything, waits until it's healthy, loads the demo CRM (first time only) and makes one simulated call: `bash deploy/cpu_test.sh`. Afterwards, `bash deploy/stack.sh <command>` runs `docker compose` with the right files for your `.env`, for example `bash deploy/stack.sh ps`, `bash deploy/stack.sh logs --tail 50 agent` or `bash deploy/stack.sh down`.
+
 Seed the demo CRM (20 leads, L001–L020) once, inside the agent container:
 ```bash
 docker compose -f services/docker-compose.yml --env-file .env exec agent python -m crm.sqlite_adapter --seed

@@ -16,26 +16,9 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-COMPOSE=(docker compose -f services/docker-compose.yml)
-# SERVER_LLM=ollama in .env: use the server's own Ollama instead of vLLM (services/docker-compose.ollama.yml)
-SERVER_LLM=$(grep -E '^SERVER_LLM=' .env | tail -n 1 | cut -d= -f2- | tr -d '[:space:]"' || true)
-case "${SERVER_LLM:-vllm}" in
-  ollama) COMPOSE+=(-f services/docker-compose.ollama.yml); echo "==> LLM: Ollama on this server" ;;
-  vllm)   echo "==> LLM: vLLM" ;;
-  *)      echo "SERVER_LLM in .env must be vllm or ollama, not '$SERVER_LLM'" >&2; exit 1 ;;
-esac
-# SERVER_GPU=0 in .env: no GPU (tests only): STT and TTS on the CPU (services/docker-compose.cpu.yml)
-SERVER_GPU=$(grep -E '^SERVER_GPU=' .env | tail -n 1 | cut -d= -f2- | tr -d '[:space:]"' || true)
-case "${SERVER_GPU:-1}" in
-  0)
-    if [ "${SERVER_LLM:-vllm}" != ollama ]; then
-      echo "SERVER_GPU=0 needs SERVER_LLM=ollama in .env: vLLM can't run without a GPU" >&2; exit 1
-    fi
-    COMPOSE+=(-f services/docker-compose.cpu.yml); echo "==> no GPU: STT and TTS on the CPU (slow, for tests)" ;;
-  1) ;;
-  *) echo "SERVER_GPU in .env must be 1 or 0, not '$SERVER_GPU'" >&2; exit 1 ;;
-esac
-COMPOSE+=(--env-file .env)
+# the docker compose command for this .env (SERVER_LLM, SERVER_GPU): see deploy/stack.sh
+source "$DIR/deploy/stack.sh"
+stack_compose
 HEALTH_TRIES="${HEALTH_TRIES:-18}"     # x 10 s = 3 minutes for the agent to come up
 
 PREV=$(git rev-parse HEAD)
