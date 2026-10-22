@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime
 from enum import Enum
 
 from openai import AsyncOpenAI
@@ -37,6 +38,11 @@ class CallOutcome(BaseModel):
     callback_time_text: str | None = Field(
         default=None, description="the callback time exactly as agreed, e.g. 'Thursday 4pm'"
     )
+    callback_at: str | None = Field(
+        default=None,
+        description="the agreed callback as an ISO 8601 local datetime like 2026-10-14T16:00, worked out "
+                    "from the call time; null if no day and time were agreed",
+    )
     summary: str = Field(description="2-3 sentence summary for the sales team")
 
 
@@ -55,6 +61,7 @@ was given, use the upper bound.
 - lead_update.status must match outcome when outcome is qualified, interested, \
 not_interested, do_not_call or wrong_number; for callback use status "callback".
 - outcome "qualified" only if budget, preferred_area, property_type and timeline are all known.
+- callback_requested is true only if the USER asked to be called at another time. Then fill callback_time_text with their words and callback_at with that moment as an ISO 8601 local datetime, counted from the call time given below ("tomorrow at 4" -> the next day at 16:00). If they gave no clear day or time, leave callback_at null.
 - Leave fields null when they were not discussed.
 """
 
@@ -75,7 +82,7 @@ def _parse_json(text: str) -> dict:
 
 async def extract_outcome(
     client: AsyncOpenAI, model: str, lead: Lead, turns: list[dict], retries: int = 1,
-    stats: list[dict] | None = None,
+    stats: list[dict] | None = None, call_time: datetime | None = None,
 ) -> CallOutcome:
     """`stats`, if given, gets one entry per LLM request: seconds, tokens, whether the JSON was valid."""
     if not any(t["role"] == "user" and t.get("text") for t in turns):
@@ -86,7 +93,8 @@ async def extract_outcome(
         {"role": "system", "content": EXTRACTION_PROMPT.format(schema=json.dumps(schema))},
         {
             "role": "user",
-            "content": f"Lead name: {lead.name}\nProject: {lead.project_interest}\n\n"
+            "content": (f"Call time: {call_time:%A %Y-%m-%d %H:%M}\n" if call_time else "")
+            + f"Lead name: {lead.name}\nProject: {lead.project_interest}\n\n"
             f"Transcript:\n{format_transcript(turns)}",
         },
     ]

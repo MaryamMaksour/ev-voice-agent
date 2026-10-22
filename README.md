@@ -1,9 +1,9 @@
 # AI Voice Agent: real-estate lead qualification (self-hosted LiveKit + vLLM)
 
 The agent calls a lead, **checks the lead in the CRM before it speaks**, asks the qualifying questions,
-and **updates the CRM** during and after the call. Everything runs on the company GPU server:
+and **updates the CRM** during and after the call. English only. Everything runs on the company GPU server, because that is cheaper than cloud AI APIs at this call volume:
 
-- **Self-hosted LiveKit** for real-time audio. You talk to the agent **by voice from a terminal** today; a **3CX** phone line plugs in later through LiveKit SIP.
+- **Self-hosted LiveKit** for real-time audio. You talk to the agent **by voice from the demo website** in your browser today; a **3CX** phone line plugs in later through LiveKit SIP.
 - **Qwen3.5-9B on vLLM** in production, **Ollama** for testing. Switching is two lines in `.env`; the code is the same.
 - **faster-whisper** speech-to-text and **Kokoro** text-to-speech.
 - **CI/CD with GitHub Actions**: every push is tested; a push to `main` deploys to the GPU server, checks every service, and rolls back if something is broken.
@@ -12,8 +12,8 @@ and **updates the CRM** during and after the call. Everything runs on the compan
 **Architecture: [docs/architecture.md](docs/architecture.md)** · **Every logged field: [docs/call-record.md](docs/call-record.md)**
 
 ```
- Laptop terminal (mic + speakers)                 Company GPU server  (services/docker-compose.yml)
- python -m agent.talk --lead L003 ──WebRTC──►  LiveKit :7880 ◄──► Redis ◄──► Egress ──► data/recordings/
+ Laptop browser (mic + speakers)                  Company GPU server  (services/docker-compose.yml)
+ demo website, lead L003          ──WebRTC──►  LiveKit :7880 ◄──► Redis ◄──► Egress ──► data/recordings/
    (later: 3CX ──SIP──► LiveKit SIP)              │
                                                   ▼
                                        Agent worker (one process per call)
@@ -27,7 +27,7 @@ and **updates the CRM** during and after the call. Everything runs on the compan
 
 ## What happens on a call
 
-1. `agent.talk` (or, later, 3CX) puts the caller in a LiveKit room named after the lead (`lead-L003-…`).
+1. The demo website (or, later, 3CX) puts the caller in a LiveKit room named after the lead (`lead-L003-…`).
 2. LiveKit sends the room to the agent worker. The agent:
    - loads the lead (name, project of interest, what's already known),
    - skips leads marked do-not-call,
@@ -44,7 +44,7 @@ and **updates the CRM** during and after the call. Everything runs on the compan
 
 **Thinking is off** for voice speed. vLLM gets `chat_template_kwargs: {enable_thinking: false}` on every request; Ollama gets `think: false` and `/no_think` in the prompt. The agent also strips any `<think>` text before speech, as a last safety net. `reasoning_tokens` in `llm.jsonl` shows whether the model thought anyway.
 
-**Why there is no Celery.** Each call already runs in its own process, so the post-call check (1–2 s on vLLM) runs in parallel for every call without a queue. If a process dies before it finishes, the call isn't lost: the agent saved `data/calls/<call_id>.raw.json` first, and `python -m agent.postcall` finishes it (the agent container runs this at every start). **Redis stays**, because LiveKit needs it to talk to Egress (call recording) and, later, the SIP service for 3CX.
+**Why there is no Celery.** Each call already runs in its own process, so the post-call check (1–2 s on vLLM) runs in parallel for every call without a queue. If a process dies before it finishes, the call isn't lost: the agent saved `data/calls/<call_id>.raw.json` first, and `python -m agent.postcall` finishes it (the agent container runs this at every start). If the post-call work itself fails (LLM or CRM down), the raw file is kept and retried every 5 minutes, up to `POST_CALL_MAX_ATTEMPTS` (5) times; the call record shows `post_call_status` `failed`, then `needs_review` if it never worked. **Redis stays**, because LiveKit needs it to talk to Egress (call recording) and, later, the SIP service for 3CX.
 
 ---
 
@@ -55,7 +55,7 @@ Ollama runs the same model (Qwen3.5-9B). It is slower than vLLM, which is fine f
 ```bash
 ollama pull qwen3.5:9b                     # or qwen3:8b on a small GPU
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -e ".[dev,talk]"
+pip install -e ".[dev,demo]"
 cp .env.example .env                       # already set for Ollama: LLM_BASE_URL=http://localhost:11434/v1
 python -m crm.sqlite_adapter --seed        # 20 demo leads, L001–L020
 python -m agent.check --skip stt,tts,livekit   # is Ollama answering?
@@ -71,7 +71,7 @@ python -m agent.main console --text
 docker compose -f services/docker-compose.local.yml --env-file .env up -d   # add --profile ollama if Ollama isn't installed
 python -m agent.main download-files        # once: VAD + turn-detector weights
 python -m agent.main dev                   # terminal 1: the agent
-python -m agent.talk --lead L003           # terminal 2: you, on the mic
+python -m demo.server                      # terminal 2: the demo website, then open http://localhost:8090
 ```
 Or `python -m agent.main console` for voice without LiveKit.
 
@@ -135,19 +135,25 @@ docker compose -f services/docker-compose.yml --env-file .env exec agent python 
 - On a 24 GB card, set `VLLM_EXTRA_ARGS=--quantization fp8` and `VLLM_GPU_UTIL=0.6`.
 - **No Docker on the server?** `bash deploy/vllm_start.sh` starts vLLM with the same flags.
 
-## 2. Talk to the agent by voice from your laptop
+## 2. Talk to the agent: the demo website
 
-```bash
-pip install -e ".[talk]"
-# .env: same LIVEKIT_API_KEY / SECRET as the server, and LIVEKIT_URL=ws://<server-ip>:7880
-python -m agent.talk --lead L003
-```
+A single page: pick one of the 20 demo leads, press **Start call** and talk through your browser. The lead's row refreshes while you talk and highlights what the agent saved. When the call ends the page shows the outcome, the summary and the conversation. **Reset lead** puts a lead back to its starting values so you can repeat the demo.
 
-- You hear the agent and see live captions of both sides. **Ctrl+C** hangs up.
-- Use headphones. Echo cancellation is on, but headphones are cleaner.
-- Wrong mic or speaker? Run `python -m agent.talk --list-devices`, then `--input-device N --output-device M`.
-- Pick another lead with `--lead L007`.
-- **No sound card** (a server, a CI box): `--audio-file caller.wav --save-audio agent.wav --seconds 60` sends a recording as the caller and saves what the agent says.
+It uses the demo CRM only (it refuses to start with Zoho) and has no login: it listens on the server's own `127.0.0.1`.
+
+On the company server:
+
+1. In the server's `.env` add `DEMO=1` and make sure `CRM_BACKEND=sqlite`. **Remove `DEMO=1` before real phone calls**: while it is on, LiveKit advertises `127.0.0.1` so the call audio can travel through the SSH tunnel, and phones cannot connect.
+2. Deploy as usual (`DEPLOY_DIR=$(pwd) bash deploy/deploy.sh <commit>`). First time only, load the leads: `bash deploy/stack.sh exec agent python -m crm.sqlite_adapter --seed`.
+3. On your laptop (on the VPN) open the tunnel and keep it open:
+   ```
+   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 -L 7881:localhost:7881 <user>@<server>
+   ```
+4. Open **http://localhost:8090** (use `localhost`: browsers only allow the microphone there), pick a lead and press **Start call**. Use headphones.
+
+If the page does not load: `bash deploy/stack.sh logs --tail 50 demo`. If you connect but nobody answers, the agent is not running: `bash deploy/stack.sh logs --tail 50 agent`.
+
+Every demo call is saved like a normal call (`data/calls/`), so it also shows in the dashboard as a browser call.
 
 ## 3. Where everything is saved
 
@@ -245,6 +251,9 @@ python -m agent.dial --lead L003 --number +9715...   # ring your own number to t
 | `MAX_CALLS_PER_DAY`, `MAX_CALLS_PER_WEEK` | 1, 2 | Phone calls per lead per day (calendar day) and per 7 days. 0 = no limit |
 | `BLOCKED_STATUSES` | `not_interested,do_not_call,wrong_number` | Never call leads with these CRM statuses |
 | `CALL_HOURS` | empty (24/7) | e.g. `09:00-18:00`: only call in this window |
+| `MAX_CALL_SECONDS` | 600 | A call longer than this ends with a short goodbye (`ended_by` = `max_duration`). 0 = no limit |
+| `SILENCE_TIMEOUT_SECONDS`, `SILENCE_GRACE_SECONDS` | 20, 15 | A silent caller is asked "are you still there?" after the first, and hung up on after the second (`ended_by` = `silence`). 0 = off |
+| `POST_CALL_MAX_ATTEMPTS` | 5 | Failed post-call work is retried every 5 minutes this many times, then marked `needs_review` |
 | `LLM_FAILURE_CALLBACK_MINUTES` | 60 | The LLM failed mid-call: the agent says sorry, ends the call and books a callback this far ahead |
 | `BLOCKED_DIR` | `data/blocked` | Dials the rules stopped, one line each (see [docs/call-record.md](docs/call-record.md)) |
 | `LOGS_DIR`, `LOG_LEVEL`, `LOG_KEEP_DAYS` | `logs`, INFO, 30 | Service logs |
@@ -255,11 +264,12 @@ python -m agent.dial --lead L003 --number +9715...   # ring your own number to t
 ## Repo layout
 
 ```
-agent/      main.py (worker), talk.py (terminal caller), postcall.py (finish left-over calls),
+agent/      main.py (worker), postcall.py (finish left-over calls),
             calllog.py (per-call logs), logging_setup.py (JSON logs), prompts.py, tools.py, extraction.py,
             events.py, metrics.py, telephony.py, dial.py, check.py, make_token.py, config.py
 crm/        port.py (CRMClient), audited.py (records every write), sqlite_adapter.py, zoho_adapter.py
-services/   docker-compose.yml (server), docker-compose.local.yml (laptop, no GPU), livekit*.yaml, stt_server.py
+demo/       the demo website: server.py (small API) and index.html (the page)
+services/   docker-compose.yml (server), docker-compose.demo.yml (demo website), docker-compose.local.yml (laptop, no GPU), livekit*.yaml, stt_server.py
 deploy/     deploy.sh (deploy + check + roll back), vllm_start.sh (vLLM without Docker)
 .github/    workflows/ci-cd.yml
 docs/       architecture.md, call-record.md
@@ -271,21 +281,11 @@ tests/      unit and wiring tests (no GPU), real-LLM scenario tests (opt-in)
 ## Tests
 
 ```bash
-pip install -e ".[dev,talk]"
+pip install -e ".[dev]"
 pytest                                               # no GPU or server needed (CI runs this)
 RUN_LLM_TESTS=1 pytest tests/test_scenarios_llm.py   # real scenarios against the LLM in .env (Ollama or vLLM)
 python -m evals.run_extraction                       # CRM-update accuracy on 15 sample transcripts
 python -m evals.run_speech                           # STT/TTS accuracy (round trip, or --audio-dir real recordings)
-```
-
-**Full dry run without a GPU.** Fake STT, LLM and TTS stand in for the models; LiveKit, the agent and `agent.talk` are real:
-```bash
-python -m tests.stub_models --port 9000                    # fake models
-docker compose -f services/docker-compose.local.yml up -d livekit
-# .env: LLM_BASE_URL=STT_BASE_URL=TTS_BASE_URL=http://127.0.0.1:9000/v1  TURN_DETECTION=vad
-python -m agent.main dev &
-python -m agent.talk --lead L003 --audio-file caller.wav --save-audio agent.wav --seconds 25
-ls data/calls/                                             # the call record and its log folder
 ```
 
 **Calls per GPU:**
@@ -302,7 +302,6 @@ These custom lead fields must exist in the Leads layout: `Budget`, `Preferred_Ar
 
 ## Not covered yet
 
-- Arabic: needs an Arabic STT and TTS model.
 - 3CX trunk setup (the code is ready).
 - Failover across several GPU servers.
 - Recording consent and retention rules. (Calling limits are in place: see `MAX_CALLS_PER_DAY` and the other calling rules.)

@@ -77,6 +77,14 @@ class Settings:
 
     # --- post-call work runs in the agent; this is how long it waits for Egress to close the recording
     recording_wait_seconds: float = field(default_factory=lambda: float(_env("RECORDING_WAIT_SECONDS", "10")))
+    # if that work fails (LLM or CRM down) it is retried; after this many failures the call is marked needs_review
+    post_call_max_attempts: int = field(default_factory=lambda: int(_env("POST_CALL_MAX_ATTEMPTS", "5")))
+
+    # --- limits on one call (agent/limits.py); 0 turns each off
+    max_call_seconds: float = field(default_factory=lambda: float(_env("MAX_CALL_SECONDS", "600")))
+    # silence before the agent asks "are you still there?", then how long before it hangs up
+    silence_timeout_seconds: float = field(default_factory=lambda: float(_env("SILENCE_TIMEOUT_SECONDS", "20")))
+    silence_grace_seconds: float = field(default_factory=lambda: float(_env("SILENCE_GRACE_SECONDS", "15")))
 
     # --- phone line: 3CX through a LiveKit SIP outbound trunk (empty = browser / console calls only)
     sip_outbound_trunk_id: str = field(default_factory=lambda: _env("SIP_OUTBOUND_TRUNK_ID", ""))

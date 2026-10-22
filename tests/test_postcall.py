@@ -24,7 +24,7 @@ def _event(call_id="c1", **kw) -> CallEnded:
     return CallEnded(call_id=call_id, lead_id="L001", started_at=started.isoformat(),
                      ended_at=ended.isoformat(), room="lead-L001-x", ended_by="agent",
                      transcript=[{"role": "agent", "text": "Hi"}, {"role": "user", "text": "A villa, 2 million"}],
-                     actions=[], metrics={"turns": 1}, **kw)
+                     metrics={"turns": 1}, **{"actions": [], **kw})
 
 
 def _processor(crm, fake, tmp_path) -> PostCallProcessor:
@@ -92,6 +92,53 @@ async def test_llm_down_still_saves_the_record_with_the_error(crm, tmp_path):
     record = json.loads((tmp_path / "calls" / "c1.json").read_text())
     assert record["error"] and record["errors"][-1]["stage"] == "post_call"
     assert record["post_call_llm"]["requests"] == 1 and record["post_call_llm"]["ok"] is False
+    # the failure is not final: the raw file stays so agent.postcall can try again
+    assert record["post_call_status"] == "failed" and record["post_call_attempts"] == 1
+    assert (tmp_path / "calls" / "c1.raw.json").exists()
+
+
+async def test_failed_post_call_work_is_retried_until_it_works(crm, tmp_path):
+    calls = tmp_path / "calls"
+    down = AsyncOpenAI(base_url="http://127.0.0.1:9/v1", api_key="x", max_retries=0)
+    failing = PostCallProcessor(crm, down, "qwen3.5-9b", str(calls), logs_dir=str(tmp_path / "logs"))
+    write_raw(_event(), calls)
+    assert await process_pending(failing, min_age_seconds=0) == []  # failed: not finished
+    assert json.loads((calls / "c1.json").read_text())["post_call_status"] == "failed"
+    assert (await crm.get_lead("L001")).budget is None  # nothing written yet
+
+    with FakeOpenAI(lambda messages: EXTRACTION) as fake:
+        assert await process_pending(_processor(crm, fake, tmp_path), min_age_seconds=0) == ["c1"]
+
+    record = json.loads((calls / "c1.json").read_text())
+    assert record["post_call_status"] == "done" and record["classification"] == "qualified"
+    assert record["post_call_attempts"] == 1 and not record.get("error")
+    assert not (calls / "c1.raw.json").exists()
+    assert (await crm.get_lead("L001")).budget == 2000000
+
+
+async def test_retry_waits_for_min_age(crm, tmp_path):
+    calls = tmp_path / "calls"
+    down = AsyncOpenAI(base_url="http://127.0.0.1:9/v1", api_key="x", max_retries=0)
+    failing = PostCallProcessor(crm, down, "qwen3.5-9b", str(calls), logs_dir=str(tmp_path / "logs"))
+    await failing.handle(_event())  # fails once; the raw file was just rewritten
+    with FakeOpenAI(lambda messages: EXTRACTION) as fake:
+        assert await process_pending(_processor(crm, fake, tmp_path), min_age_seconds=300) == []
+
+
+async def test_gives_up_after_max_attempts_and_marks_needs_review(crm, tmp_path):
+    calls = tmp_path / "calls"
+    down = AsyncOpenAI(base_url="http://127.0.0.1:9/v1", api_key="x", max_retries=0)
+    failing = PostCallProcessor(crm, down, "qwen3.5-9b", str(calls), logs_dir=str(tmp_path / "logs"),
+                                max_attempts=2)
+    write_raw(_event(), calls)
+    await process_pending(failing, min_age_seconds=0)
+    assert json.loads((calls / "c1.json").read_text())["post_call_status"] == "failed"
+    await process_pending(failing, min_age_seconds=0)
+
+    record = json.loads((calls / "c1.json").read_text())
+    assert record["post_call_status"] == "needs_review" and record["post_call_attempts"] == 2
+    assert not (calls / "c1.raw.json").exists()  # no more retries
+    assert await process_pending(failing, min_age_seconds=0) == []
 
 
 async def test_pending_raw_calls_are_finished_later(crm, tmp_path):
@@ -144,3 +191,49 @@ async def test_audit_callback_errors_never_break_crm_writes(crm):
 
     lead = await AuditedCRM(crm, broken).update_lead("L001", LeadUpdate(budget=1))
     assert lead.budget == 1
+
+
+def _callback_extraction(**kw) -> dict:
+    return {"outcome": "callback", "summary": "Busy now, wants a call tomorrow.", "callback_requested": True,
+            "lead_update": {"status": "callback"}, **kw}
+
+
+async def test_callback_found_after_the_call_is_booked(crm, tmp_path):
+    when = (datetime.now() + timedelta(days=1)).replace(hour=16, minute=0, second=0, microsecond=0)
+    reply = _callback_extraction(callback_time_text="tomorrow at 4", callback_at=when.isoformat(timespec="minutes"))
+    with FakeOpenAI(lambda messages: reply) as fake:
+        await _processor(crm, fake, tmp_path).handle(_event())
+
+    lead = await crm.get_lead("L001")
+    assert lead.callback_at is not None and lead.callback_at.hour == 16 and lead.status.value == "callback"
+    record = json.loads((tmp_path / "calls" / "c1.json").read_text())
+    assert record["callback"]["booked"] is True and record["callback"]["by"] == "post_call"
+
+
+async def test_callback_without_a_usable_time_leaves_a_note(crm, tmp_path):
+    reply = _callback_extraction(callback_time_text="sometime next week", callback_at="not a date")
+    with FakeOpenAI(lambda messages: reply) as fake:
+        await _processor(crm, fake, tmp_path).handle(_event())
+
+    lead = await crm.get_lead("L001")
+    assert lead.callback_at is None and any("sometime next week" in n for n in lead.notes)
+    assert json.loads((tmp_path / "calls" / "c1.json").read_text())["callback"]["booked"] is False
+
+
+async def test_callback_in_the_past_is_not_booked(crm, tmp_path):
+    reply = _callback_extraction(callback_time_text="yesterday", callback_at="2020-01-01T10:00")
+    with FakeOpenAI(lambda messages: reply) as fake:
+        await _processor(crm, fake, tmp_path).handle(_event())
+    assert (await crm.get_lead("L001")).callback_at is None
+
+
+async def test_callback_the_agent_already_booked_is_left_alone(crm, tmp_path):
+    booked = datetime.now(timezone.utc) + timedelta(days=2)
+    await crm.schedule_callback("L001", booked)
+    other = (datetime.now() + timedelta(days=1)).isoformat(timespec="minutes")
+    reply = _callback_extraction(callback_time_text="tomorrow", callback_at=other)
+    with FakeOpenAI(lambda messages: reply) as fake:
+        await _processor(crm, fake, tmp_path).handle(
+            _event(actions=[{"action": "schedule_callback", "when": booked.isoformat()}]))
+
+    assert (await crm.get_lead("L001")).callback_at == booked  # the in-call value wins

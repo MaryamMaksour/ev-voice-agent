@@ -180,9 +180,9 @@ services:
     volumes:
       - ../data:/app/data
       - ../logs:/app/logs
-    # first finish post-call work a crash or restart left behind; keep data/health.json fresh for the
-    # dashboard (every service checked once a minute); then wait for calls
-    command: ["sh", "-c", "python -m agent.postcall --min-age 0 || true; python -m agent.check --write /app/data/health.json --watch 60 > /dev/null 2>&1 & exec python -m agent.main start"]
+    # first finish post-call work a crash or restart left behind, then retry failed ones every 5 minutes;
+    # keep data/health.json fresh for the dashboard (every service checked once a minute); then wait for calls
+    command: ["sh", "-c", "python -m agent.postcall --min-age 0 || true; python -m agent.postcall --min-age 300 --watch 300 > /dev/null 2>&1 & python -m agent.check --write /app/data/health.json --watch 60 > /dev/null 2>&1 & exec python -m agent.main start"]
     # a deploy stops the old agent: LiveKit lets running calls finish first (up to 10 minutes)
     stop_signal: SIGTERM
     stop_grace_period: 10m

@@ -12,7 +12,7 @@ While post-call work is still running, the file is `<call_id>.raw.json`.
 |---|---|
 | `call_id`, `lead_id`, `room` | Which call, which lead, which LiveKit room |
 | `started_at`, `ended_at`, `duration_seconds` | When, and how long |
-| `ended_by`, `close_reason`, `agent_closed` | Who ended it (`agent` / `lead` / `transferred` / `not_reached` / `error`) and LiveKit's reason |
+| `ended_by`, `close_reason`, `agent_closed` | Who ended it (`agent` / `lead` / `transferred` / `not_reached` / `error` / `max_duration` / `silence`) and LiveKit's reason |
 | `transcript` | Every line, `{role: agent|user, text}` |
 | `tool_calls` | Every tool the LLM called: name, arguments, output, error, time |
 | `actions` | The CRM writes the agent's tools made |
@@ -27,6 +27,8 @@ While post-call work is still running, the file is `<call_id>.raw.json`.
 | `settings` | Temperature, LLM timeout and retries, thinking off, `llm_backend` (vllm / ollama), turn detection, interruption mode, VAD thresholds, recording on/off, post-call mode |
 | `errors` | Every pipeline error: `stage` (stt / llm / tts / vad / session / post_call), `error`, `at`, `recoverable` |
 | `post_call_seconds`, `error` | How long post-call work took; its error if it failed |
+| `callback` | The lead asked for a callback: `booked`, `by` (`call` = the agent booked it, `post_call` = the check did), `callback_at` and `said`. Without a usable time nothing is booked and a note asks a person to follow up. |
+| `post_call_status`, `post_call_attempts` | `done`; `failed` (the raw file is kept and retried every 5 minutes); or `needs_review` (gave up after `POST_CALL_MAX_ATTEMPTS`: update the lead by hand). Attempts = failed runs so far. |
 | `post_call_llm` | The post-call LLM check: `requests` (more than 1 if the first JSON was invalid), `seconds`, `prompt_tokens`, `completion_tokens`, `ok` |
 | `log_files` | Paths of this call's files below `data/calls/` |
 
@@ -70,6 +72,7 @@ One JSON object per line. Each line has `ts`, `t_ms` (milliseconds since the cal
 | `false_interruption` | `resumed` |
 | `error` | `stage`, `source`, `error`, `recoverable` |
 | `call_closed` | `ended_by`, `close_reason` |
+| `call_limit` | `reason`: `max_duration` or `silence`, the agent ended the call (agent/limits.py) |
 | `post_call_done` | `classification`, `seconds`, `error` |
 
 ## `data/calls/<call_id>/llm.jsonl`: every LLM request

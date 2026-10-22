@@ -56,6 +56,7 @@ from .calllog import CallLogger
 from .config import (Settings, llm_reachable, llm_server_info, no_think_body, no_think_prompt_suffix,
                      session_conn_options, warm_up_llm)
 from .events import CallEnded, InProcessBus, PostCallProcessor
+from .limits import CallLimits
 from .logging_setup import bind_call, setup_logging
 from .metrics import CallMetrics
 from .prompts import build_system_prompt, greeting_text, prompt_version
@@ -301,7 +302,8 @@ def make_bus(settings: Settings, crm, llm_client: AsyncOpenAI) -> InProcessBus:
     wait = settings.recording_wait_seconds if settings.recording_enabled else 0.0
     return InProcessBus(PostCallProcessor(crm, llm_client, settings.llm_model, settings.calls_dir,
                                           logs_dir=settings.logs_dir, recordings_dir=settings.recordings_dir,
-                                          wait_for_recording=wait))
+                                          wait_for_recording=wait,
+                                          max_attempts=settings.post_call_max_attempts, tz=settings.timezone))
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -386,6 +388,7 @@ async def entrypoint(ctx: JobContext) -> None:
     session = AgentSession(
         conn_options=session_conn_options(settings),
         vad=ctx.proc.userdata["vad"],
+        user_away_timeout=settings.silence_timeout_seconds or None,
         stt=openai.STT(
             base_url=settings.stt_base_url,
             api_key="not-needed",
@@ -425,6 +428,27 @@ async def entrypoint(ctx: JobContext) -> None:
         call_metrics.on_metrics(ev.metrics)
 
     call_log.attach(session)  # timeline, STT/LLM/TTS metrics, tool calls, errors -> data/calls/<call>/
+
+    async def say_and_wait(text: str) -> None:
+        await session.say(text, allow_interruptions=False)
+
+    async def hang_up() -> None:
+        await ctx.delete_room()  # disconnects a SIP caller too
+        session.shutdown()
+
+    def mark_ended(reason: str) -> bool:
+        if call["ended_by"]:  # the agent, a transfer or a failure is already ending this call
+            return False
+        call["ended_by"] = reason
+        call_log.event("call_limit", reason=reason)
+        return True
+
+    limits = CallLimits(max_seconds=settings.max_call_seconds, silence_grace_seconds=settings.silence_grace_seconds,
+                        say=say_and_wait, hang_up=hang_up, on_end=mark_ended)
+
+    @session.on("user_state_changed")
+    def _on_user_state(ev) -> None:
+        limits.user_state(ev.new_state)
 
     fallback_tasks: set = set()
 
@@ -502,6 +526,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("latency summary: %s", call_metrics.summary())
 
     def _on_close(ev) -> None:
+        limits.close()
         call["close_reason"] = getattr(ev.reason, "value", str(ev.reason))
         publish_call_ended()
 
@@ -540,6 +565,7 @@ async def entrypoint(ctx: JobContext) -> None:
     call_log.event("recording", **(call["recording"] or {"ok": False, "error": "RECORDING_ENABLED=0"}))
     await session.start(agent=LeadQualifierAgent(lead, tools, settings, recorded=recorded, call_log=call_log),
                         room=ctx.room)
+    limits.start()
 
 
 if __name__ == "__main__":

@@ -2,10 +2,12 @@
 
     python -m agent.postcall                 # raw call files older than 5 minutes
     python -m agent.postcall --min-age 0     # all of them (the agent container does this at start)
+    python -m agent.postcall --watch 300     # keep running: look again every 300 s (retries failed ones)
 
 Each data/calls/<call_id>.raw.json is checked with the LLM, the CRM is filled in and the final
 <call_id>.json written, exactly as if the call had just ended. Calls that are already done
-have no raw file, so running this twice is safe.
+have no raw file, so running this twice is safe. A call whose post-call work failed keeps its raw
+file and is tried again (POST_CALL_MAX_ATTEMPTS times, then marked needs_review in its record).
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import time
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -30,7 +33,8 @@ async def run(min_age_seconds: float) -> list[str]:
     settings = Settings()
     llm = AsyncOpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
     processor = PostCallProcessor(make_crm(), llm, settings.llm_model, settings.calls_dir,
-                                  logs_dir=settings.logs_dir, recordings_dir=settings.recordings_dir)
+                                  logs_dir=settings.logs_dir, recordings_dir=settings.recordings_dir,
+                                  max_attempts=settings.post_call_max_attempts, tz=settings.timezone)
     try:
         return await process_pending(processor, min_age_seconds=min_age_seconds)
     finally:
@@ -42,10 +46,17 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--min-age", type=float, default=300,
                    help="only raw files older than this many seconds (default 300)")
+    p.add_argument("--watch", type=float, default=0, metavar="SECONDS",
+                   help="keep running and look again every SECONDS (0 = run once)")
     args = p.parse_args()
     setup_logging("postcall", console=True)
-    done = asyncio.run(run(args.min_age))
-    print(f"post-call work finished for {len(done)} call(s)" + (f": {', '.join(done)}" if done else ""))
+    while True:
+        done = asyncio.run(run(args.min_age))
+        print(f"post-call work finished for {len(done)} call(s)" + (f": {', '.join(done)}" if done else ""),
+              flush=True)
+        if not args.watch:
+            break
+        time.sleep(args.watch)
 
 
 if __name__ == "__main__":

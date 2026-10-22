@@ -1,7 +1,7 @@
 # Architecture
 
 A self-hosted AI voice agent that phones real-estate leads, qualifies them, and updates the CRM.
-Everything runs on the company GPU server. Nothing goes to a cloud API.
+Everything runs on the company GPU server. Nothing goes to a cloud API (self-hosting is cheaper at about 3,000 calls a day). English only.
 
 ## The picture
 
