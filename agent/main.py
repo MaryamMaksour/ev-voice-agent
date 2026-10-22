@@ -15,6 +15,7 @@ Phone calls: job or room metadata {"dial": true} (the lead's CRM number) or {"ph
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -52,7 +53,7 @@ from openai import AsyncOpenAI
 from crm import Lead, make_crm
 from crm.audited import AuditedCRM
 
-from . import compliance, fallback, telephony
+from . import compliance, demo_mode, fallback, telephony
 from .calllog import CallLogger
 from .config import (Settings, llm_reachable, llm_server_info, no_think_body, no_think_prompt_suffix,
                      session_conn_options, warm_up_llm)
@@ -72,7 +73,7 @@ Interest = Literal["hot", "warm", "cold"]
 
 class LeadQualifierAgent(Agent):
     def __init__(self, lead: Lead, tools: LeadTools, settings: Settings, recorded: bool = False,
-                 call_log: CallLogger | None = None) -> None:
+                 call_log: CallLogger | None = None, prompt_template: str | None = None) -> None:
         super().__init__(
             instructions=build_system_prompt(
                 lead,
@@ -80,6 +81,7 @@ class LeadQualifierAgent(Agent):
                 agent_name=settings.agent_name,
                 tz=settings.timezone,
                 now=datetime.now(ZoneInfo(settings.timezone)),
+                template=prompt_template,
             ) + no_think_prompt_suffix(settings.llm_model, settings.llm_backend),
             tools=[
                 EndCallTool(
@@ -252,7 +254,7 @@ server = AgentServer(
 )
 
 
-def versions() -> dict:
+def versions(prompt_template: str | None = None) -> dict:
     """Which code, prompt and libraries ran this call (saved in every call record)."""
     import importlib.metadata as md
     import subprocess
@@ -271,7 +273,7 @@ def versions() -> dict:
         except md.PackageNotFoundError:
             return None
 
-    return {"code": sha or None, "prompt": prompt_version(), "livekit_agents": ver("livekit-agents"),
+    return {"code": sha or None, "prompt": prompt_version(prompt_template), "livekit_agents": ver("livekit-agents"),
             "livekit_plugins_openai": ver("livekit-plugins-openai"), "voice_agent": ver("voice-agent")}
 
 
@@ -282,7 +284,7 @@ def _result(task: asyncio.Future, default):
     return default
 
 
-def call_settings(settings: Settings, vad) -> dict:
+def call_settings(settings: Settings, vad, demo: dict | None = None) -> dict:
     """The knobs that change how a call behaves, saved with the call so runs can be compared."""
     vad_opts = getattr(vad, "_opts", None)
     return {
@@ -294,6 +296,7 @@ def call_settings(settings: Settings, vad) -> dict:
         if vad_opts else None,
         "stt_language": "en", "tts_format": "mp3", "recording": settings.recording_enabled,
         "llm_backend": settings.llm_backend, "post_call": "in_process",
+        **({"demo": demo} if demo else {}),
     }
 
 
@@ -316,7 +319,9 @@ server.setup_fnc = prewarm
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
-    settings = Settings()
+    # demo website only (DEMO_MODE=1 and source "demo"): a custom prompt, TTS voice or STT server for this call
+    overrides = demo_mode.overrides_from_metadata([ctx.job.metadata, getattr(ctx.job.room, "metadata", "")])
+    settings = dataclasses.replace(Settings(), **{k: v for k, v in overrides.items() if k != "prompt"})
     started_at = datetime.now(timezone.utc).isoformat()
     lead_id = resolve_lead_id(ctx, settings.default_lead_id)
     call_id = f"{ctx.room.name}-{started_at[:19].replace(':', '')}"
@@ -363,7 +368,7 @@ async def entrypoint(ctx: JobContext) -> None:
             return
     # looked up in the background so the greeting isn't delayed; read when the call ends
     llm_info_task = asyncio.ensure_future(asyncio.to_thread(llm_server_info, settings))
-    versions_task = asyncio.ensure_future(asyncio.to_thread(versions))
+    versions_task = asyncio.ensure_future(asyncio.to_thread(versions, overrides.get("prompt")))
 
     call: dict = {"ended_by": "", "close_reason": "", "tool_calls": [], "line": None, "recording": None,
                   "fallback": None}
@@ -494,7 +499,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 recording=call["recording"],
                 transfer=tools.transfer,
                 versions=_result(versions_task, {}),
-                settings=call_settings(settings, vad),
+                settings=call_settings(settings, vad, demo_mode.summary(overrides)),
                 errors=call_log.errors,
                 log_files=call_log.files(),
                 fallback=call["fallback"],
@@ -539,7 +544,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     recorded = bool(call["recording"] and call["recording"].get("ok"))
     call_log.event("recording", **(call["recording"] or {"ok": False, "error": "RECORDING_ENABLED=0"}))
-    await session.start(agent=LeadQualifierAgent(lead, tools, settings, recorded=recorded, call_log=call_log),
+    await session.start(agent=LeadQualifierAgent(lead, tools, settings, recorded=recorded, call_log=call_log,
+                                              prompt_template=overrides.get("prompt")),
                         room=ctx.room)
 
 
