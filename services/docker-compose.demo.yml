@@ -1,0 +1,29 @@
+# The demo website on the company server. Turn it on with one line in .env:   DEMO=1
+# deploy/stack.sh then adds this file on top of docker-compose.yml.
+#
+# From your laptop (on the VPN), open the tunnel and keep it open:
+#   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 -L 7881:localhost:7881 <user>@<server>
+# then open http://localhost:8090 (use "localhost": browsers only allow the microphone there).
+#
+# Why LiveKit's --node-ip: the browser's call audio goes to the address LiveKit advertises. Through an SSH
+# tunnel the browser can only reach the server as 127.0.0.1, so LiveKit advertises that, and the audio
+# travels over TCP port 7881 (forwarded by the tunnel). While this is on, phones (3CX) cannot connect to
+# LiveKit's audio: remove DEMO from .env (or set it to 0) before real calls.
+
+services:
+  livekit:
+    command: --config /etc/livekit.yaml --node-ip 127.0.0.1
+
+  # Same image as the agent; listens on the server's own 127.0.0.1:8090 and uses the agent's demo CRM.
+  demo:
+    image: ev-voice-agent:${GIT_SHA:-latest}
+    network_mode: host
+    env_file: ../.env
+    environment:
+      CALLS_DIR: /app/data/calls
+    volumes:
+      - ../data:/app/data
+    command: ["python", "-m", "demo.server"]
+    depends_on:
+      livekit: {condition: service_started}
+    restart: unless-stopped

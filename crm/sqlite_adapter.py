@@ -97,6 +97,13 @@ class SQLiteCRM:
         for lead_id, name, phone, project in DEMO_LEADS:
             self._put(Lead(id=lead_id, name=name, phone=phone, project_interest=project))
 
+    def reset_lead(self, lead_id: str) -> Lead:
+        """Put one demo lead back to its seeded values (no answers, no notes, callable again)."""
+        for demo_id, name, phone, project in DEMO_LEADS:
+            if demo_id == lead_id:
+                return self._put(Lead(id=demo_id, name=name, phone=phone, project_interest=project))
+        raise LeadNotFoundError(lead_id)
+
     # -- CRMClient --
 
     async def get_lead(self, lead_id: str) -> Lead:

@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Agent Demo</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2330; --muted:#6b7585; --line:#e3e6eb; --accent:#2457d6;
+          --good:#1a7f4b; --bad:#c0392b; --flash:#fff3bf; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151b; --card:#1a1f27; --text:#e8ebf0; --muted:#8f9aab; --line:#2b323d; --accent:#6f95ff;
+            --good:#4cc38a; --bad:#ff7b6b; --flash:#4a4118; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui, sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); background:var(--card); }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:16px; padding:16px 20px; align-items:start; }
+  @media (max-width: 900px) { main { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th, td { padding:8px 10px; text-align:left; white-space:nowrap; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:var(--bg); }
+  tbody tr.sel { outline:2px solid var(--accent); outline-offset:-2px; }
+  td.changed { background:var(--flash); font-weight:600; }
+  .none { color:var(--muted); }
+  aside { padding:16px; position:sticky; top:16px; }
+  aside h2 { margin:0 0 2px; font-size:16px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:12px; }
+  .row { display:flex; gap:8px; margin-bottom:12px; }
+  button { font:inherit; padding:9px 14px; border-radius:6px; border:1px solid var(--line); background:var(--card);
+           color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; flex:1; }
+  button.end { background:var(--bad); border-color:var(--bad); color:#fff; flex:1; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  #status { font-size:13px; min-height:20px; margin-bottom:8px; }
+  #status.err { color:var(--bad); }
+  #status.live { color:var(--good); font-weight:600; }
+  .result h3 { margin:14px 0 4px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .result p { margin:0; }
+  .line { margin:4px 0; font-size:14px; }
+  .line b { display:inline-block; min-width:56px; color:var(--muted); font-weight:600; }
+  .transcript { max-height:320px; overflow-y:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Voice Agent Demo</h1>
+  <p>Pick a lead, press Start call and talk. The row on the left changes as the agent saves what you say.</p>
+</header>
+<main>
+  <section class="card scroll">
+    <table>
+      <thead>
+        <tr><th>Lead</th><th>Project</th><th>Status</th><th>Budget</th><th>Area</th><th>Type</th><th>Timeline</th><th>Interest</th><th>Callback</th></tr>
+      </thead>
+      <tbody id="leads"></tbody>
+    </table>
+  </section>
+  <aside class="card">
+    <h2 id="who">Pick a lead</h2>
+    <div class="sub" id="whoSub">Click a row on the left.</div>
+    <div class="row">
+      <button class="primary" id="start" disabled>Start call</button>
+      <button class="end" id="end" hidden>End call</button>
+      <button id="reset" disabled>Reset lead</button>
+    </div>
+    <div id="status"></div>
+    <div class="result" id="result"></div>
+  </aside>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.15.16/dist/livekit-client.umd.min.js"
+        integrity="sha384-3GMYoP8GHYbrzN9ze+qzfYdNXXPgxGllauhQ4KN/QVcIcT3mZc1Rsz+IPfgn0YAx"
+        crossorigin="anonymous"></script>
+<script>
+const FIELDS = ["status", "budget", "preferred_area", "property_type", "timeline", "interest_level", "callback_at"];
+const CLASSES = {qualified: "Qualified", interested: "Interested, details missing", callback: "Callback booked",
+  not_interested: "Not interested", do_not_call: "Do not call", wrong_number: "Wrong number",
+  no_conversation: "No conversation", not_reached: "Not reached"};
+
+let leads = [], selected = null, before = null, changed = new Set();
+let room = null, roomName = null, onCall = false, callFailed = false, refresher = null;
+
+const $ = id => document.getElementById(id);
+
+function show(field, v) {
+  if (v === null || v === undefined || v === "") return null;
+  if (field === "budget") return "$" + Number(v).toLocaleString("en-US");
+  if (field === "callback_at") return new Date(v).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
+  return String(v).replace(/_/g, " ");
+}
+
+function cell(tr, text, flash) {
+  const td = document.createElement("td");
+  if (text === null) { td.textContent = "–"; td.className = "none"; } else { td.textContent = text; }
+  if (flash) td.classList.add("changed");
+  tr.appendChild(td);
+}
+
+function render() {
+  const body = $("leads");
+  body.replaceChildren();
+  for (const lead of leads) {
+    const tr = document.createElement("tr");
+    if (lead.id === selected) tr.className = "sel";
+    tr.addEventListener("click", () => pick(lead.id));
+    cell(tr, lead.id + "  " + lead.name, false);
+    cell(tr, lead.project_interest, false);
+    for (const f of FIELDS) cell(tr, show(f, lead[f]), lead.id === selected && changed.has(f));
+    body.appendChild(tr);
+  }
+  const lead = leads.find(l => l.id === selected);
+  $("who").textContent = lead ? lead.name : "Pick a lead";
+  $("whoSub").textContent = lead ? lead.id + " · " + (lead.project_interest || "no project") : "Click a row on the left.";
+  $("start").disabled = !lead || onCall;
+  $("reset").disabled = !lead || onCall;
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"},
+                                         body: JSON.stringify(body)} : undefined);
+  if (!res.ok) {
+    let msg = "Request failed (" + res.status + ")";
+    try { msg = (await res.json()).detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+function setStatus(text, kind) {
+  const s = $("status");
+  s.textContent = text;
+  s.className = kind || "";
+}
+
+async function loadLeads() {
+  leads = await api("/api/leads");
+  const now = leads.find(l => l.id === selected);
+  if (now && before) for (const f of FIELDS) if (String(now[f]) !== String(before[f])) changed.add(f);
+  render();
+}
+
+function pick(id) {
+  if (onCall) return;
+  selected = id;
+  before = null;
+  changed = new Set();
+  $("result").replaceChildren();
+  setStatus("");
+  render();
+}
+
+async function start() {
+  const lead = leads.find(l => l.id === selected);
+  if (!lead) return;
+  $("result").replaceChildren();
+  before = {...lead};
+  changed = new Set();
+  callFailed = false;
+  onCall = true;
+  $("start").hidden = true;
+  $("end").hidden = false;
+  $("reset").hidden = true;
+  setStatus("Connecting…");
+  render();
+  try {
+    const call = await api("/api/call", {lead_id: lead.id});
+    roomName = call.room;
+    room = new LivekitClient.Room();
+    room.on(LivekitClient.RoomEvent.TrackSubscribed, track => {
+      if (track.kind === "audio") document.body.appendChild(track.attach());
+    });
+    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, track => track.detach().forEach(e => e.remove()));
+    room.on(LivekitClient.RoomEvent.Disconnected, finished);
+    await room.connect(call.url, call.token);
+    await room.startAudio();
+    await room.localParticipant.setMicrophoneEnabled(true);
+    setStatus("On the call with " + lead.name + ". Speak when the agent greets you.", "live");
+    refresher = setInterval(() => loadLeads().catch(() => {}), 2000);
+  } catch (e) {
+    callFailed = true;
+    setStatus(e.message || String(e), "err");
+    if (room) room.disconnect();
+    else finished(true);
+  }
+}
+
+function endCall() {
+  if (room) room.disconnect();
+}
+
+// the call is over (we hung up, the agent hung up, or it never started): show what was saved
+async function finished(failed) {
+  if (!onCall) return;
+  onCall = false;
+  clearInterval(refresher);
+  $("start").hidden = false;
+  $("end").hidden = true;
+  $("reset").hidden = false;
+  room = null;
+  document.querySelectorAll("audio").forEach(a => a.remove());
+  await loadLeads().catch(() => {});
+  if (failed === true || callFailed) return;
+  setStatus("Call ended. Waiting for the summary…");
+  for (let i = 0; i < 45; i++) {
+    let r;
+    try { r = await api("/api/call/" + roomName); } catch (e) { break; }
+    if (r.done) { await loadLeads().catch(() => {}); return showResult(r); }
+    await new Promise(ok => setTimeout(ok, 2000));
+  }
+  setStatus("No summary yet. The agent may not have started the call; check the agent logs.", "err");
+}
+
+function showResult(r) {
+  setStatus("Call ended.");
+  const box = $("result");
+  box.replaceChildren();
+  const add = (title, node) => {
+    const h = document.createElement("h3"); h.textContent = title; box.appendChild(h); box.appendChild(node);
+  };
+  const p = text => { const e = document.createElement("p"); e.textContent = text; return e; };
+  add("Outcome", p(CLASSES[r.classification] || r.classification || "Unknown"));
+  if (r.summary) add("Summary", p(r.summary));
+  if (r.error) add("Problem", p(r.error));
+  const t = document.createElement("div");
+  t.className = "transcript";
+  for (const turn of r.transcript) {
+    const line = document.createElement("div");
+    line.className = "line";
+    const who = document.createElement("b");
+    who.textContent = turn.role === "agent" ? "Agent" : "You";
+    line.append(who, " " + turn.text);
+    t.appendChild(line);
+  }
+  add("Conversation", r.transcript.length ? t : p("Nothing was said."));
+}
+
+async function reset() {
+  if (!selected) return;
+  try {
+    await api("/api/reset", {lead_id: selected});
+    before = null; changed = new Set();
+    $("result").replaceChildren();
+    setStatus("Lead reset.");
+    await loadLeads();
+  } catch (e) { setStatus(e.message, "err"); }
+}
+
+$("start").addEventListener("click", start);
+$("end").addEventListener("click", endCall);
+$("reset").addEventListener("click", reset);
+loadLeads().catch(e => setStatus(e.message, "err"));
+</script>
+</body>
+</html>

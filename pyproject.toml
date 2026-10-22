@@ -14,6 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "fastapi>=0.110", "uvicorn>=0.30", "python-multipart>=0.0.9"]
+# the demo website (demo/)
+demo = ["fastapi>=0.110", "uvicorn>=0.30"]
 # run the speech-to-text server natively (no Docker): Parakeet on CPU
 stt = ["sherpa-onnx>=1.12", "numpy", "fastapi>=0.110", "uvicorn[standard]>=0.30", "python-multipart>=0.0.9"]
 stt-whisper = ["faster-whisper>=1.1", "fastapi>=0.110", "uvicorn[standard]>=0.30", "python-multipart>=0.0.9"]

@@ -38,7 +38,7 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Byte-compile everything
-        run: python -m compileall -q agent crm evals services tests
+        run: python -m compileall -q agent crm demo evals services tests
       - name: Unit and wiring tests (fake LLM, no GPU)
         run: pytest -q --junitxml=test-results.xml
       - uses: actions/upload-artifact@v4
@@ -60,6 +60,8 @@ jobs:
         run: docker compose -f services/docker-compose.yml -f services/docker-compose.ollama.yml --env-file .env config --quiet
       - name: Server stack without a GPU (SERVER_LLM=ollama, SERVER_GPU=0)
         run: docker compose -f services/docker-compose.yml -f services/docker-compose.ollama.yml -f services/docker-compose.cpu.yml --env-file .env config --quiet
+      - name: Server stack with the demo website (DEMO=1)
+        run: docker compose -f services/docker-compose.yml -f services/docker-compose.demo.yml --env-file .env config --quiet
       - name: Laptop test stack (LiveKit, STT, TTS, optional Ollama)
         run: docker compose -f services/docker-compose.local.yml --env-file .env --profile ollama config --quiet
       - name: Deploy script syntax
