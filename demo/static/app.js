@@ -4,7 +4,7 @@
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const secs = (v) => (v == null ? "–" : v >= 60 ? `${Math.floor(v / 60)} m ${Math.round(v % 60)} s` : `${Number(v).toFixed(1)} s`);
 
-  const state = { cfg: null, leads: [], room: null, roomName: null, call: null, poll: null, captions: new Map(), busy: false };
+  const state = { cfg: null, leads: [], room: null, roomName: null, call: null, poll: null, captions: new Map(), busy: false, live: false };
 
   // ---------- small helpers ----------
   async function api(path, body) {
@@ -119,11 +119,11 @@
     try {
       call = await api("/api/call", { lead_id: $("#lead").value, prompt: $("#prompt").value, tts_voice: $("#voice").value || null, stt_id: $("#stt").value || null });
     } catch (e) { showError(e.message); lockSetup(false); setStatus("Ready", "good"); $("#live").textContent = "The call did not start."; return; }
-    state.call = call; state.roomName = call.room;
+    state.call = call; state.roomName = call.room; state.live = false;
     const room = new LK.Room({ audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true } });
     state.room = room;
     room.on(LK.RoomEvent.TrackSubscribed, (track) => { if (track.kind === LK.Track.Kind.Audio) $("#audio").appendChild(track.attach()); });
-    room.on(LK.RoomEvent.ParticipantConnected, () => { setStatus("Live", "good"); $("#live").textContent = "The agent joined and will greet you. Speak after the greeting."; });
+    room.on(LK.RoomEvent.ParticipantConnected, () => { state.live = true; setStatus("Live", "good"); $("#live").textContent = "The agent joined and will greet you. Speak after the greeting."; });
     room.on(LK.RoomEvent.ParticipantDisconnected, () => endCall("The agent ended the call."));
     room.on(LK.RoomEvent.Disconnected, () => endCall("The call is over."));
     room.registerTextStreamHandler("lk.transcription", async (reader, info) => {
@@ -139,14 +139,16 @@
       setStatus("Waiting for the agent…", "warn");
       $("#live").textContent = "Connected. Waiting for the agent to pick up (the first call is slowest while the models load)…";
     } catch (e) {
-      showError(`Could not connect: ${e.message}. If the microphone was blocked, allow it in the browser and try again.`);
-      endCall("Could not connect.", true);
+      showError(`Could not connect to LiveKit at ${call.url}: ${e.message}. Check that the SSH tunnel for port 7880 is open, and that the microphone is allowed in the browser.`);
+      state.live = false;
+      endCall("The call did not start.", true);
     }
   }
   let ending = false;
   async function endCall(reason, failed) {
     if (ending || !state.roomName) return;
     ending = true;
+    if (!state.live) failed = true;  // the agent never joined: there will be no call record
     const name = state.roomName;
     try { if (state.room) await state.room.disconnect(); } catch (e) { /* already closed */ }
     state.room = null;
