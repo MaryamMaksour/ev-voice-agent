@@ -3,7 +3,7 @@
     python -m agent.main download-files   # one-time: VAD + turn-detector weights
     python -m agent.main dev              # connect to LiveKit, wait for calls
     python -m agent.main start            # same, production mode (docker: agent service)
-    python -m agent.talk --lead L003      # talk to it by voice from a terminal, through LiveKit
+    python -m demo.server                 # the demo website: talk to it from the browser (demo/README.md)
     python -m agent.main console          # talk to it in the terminal without a LiveKit server
     python -m agent.dial --lead L003      # phone the lead through 3CX (SIP_OUTBOUND_TRUNK_ID)
 

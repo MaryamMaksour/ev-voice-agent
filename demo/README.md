@@ -15,25 +15,37 @@ It uses the **demo CRM only** (20 made-up leads). It never touches real leads. I
 
 The text-to-speech engine (Kokoro) is one engine, so only its voice can be chosen. Speech-to-text is fixed per server, so a different engine needs its own server.
 
-## Start it
+## On the company server (the normal way)
+
+The website starts by itself with the rest of the stack (the `demo` service in `services/docker-compose.yml`). You only need to:
+
+1. Put `DEMO_MODE=1` in the server's `.env`. This lets the agent accept the prompt, voice and speech server chosen on the page. Remove it again before real customer calls.
+2. Deploy: `DEPLOY_DIR=$(pwd) bash deploy/deploy.sh <commit>`.
+3. On your laptop (on the VPN), open the tunnel and keep it open:
+   ```
+   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 <user>@<server>
+   ```
+4. Open **http://localhost:8090** in your browser, pick a lead, and press Start call.
+
+Use `localhost`, not the server's name: browsers only allow the microphone on `localhost` or HTTPS.
+
+If the page does not load, check the service: `bash deploy/stack.sh logs --tail 50 demo`.
+
+## On a laptop (for development)
 
 You need Docker, Ollama and this project installed (`pip install -e ".[demo]"`, plus the agent's own packages from the main README).
 
 1. **LLM**: start Ollama with the model from `.env` (`LLM_BASE_URL`, `LLM_MODEL`).
-2. **Speech and LiveKit servers**: `docker compose -f services/docker-compose.local.yml --env-file .env up -d` (LiveKit, speech-to-text, text-to-speech).
+2. **Speech and LiveKit servers**: `docker compose -f services/docker-compose.local.yml --env-file .env up -d`.
 3. **Demo CRM**: `python -m crm.sqlite_adapter --db data/demo_crm.db --seed`
-4. **Agent worker**, using the same demo CRM and with demo mode on:
+4. **Agent worker**, with the same demo CRM and demo mode on:
    ```
    set CRM_SQLITE_PATH=data/demo_crm.db
    set DEMO_MODE=1
    python -m agent.main dev
    ```
    (On Linux or Mac use `export` instead of `set`.)
-5. **Demo website**: `python -m demo.server`, then open **http://localhost:8090**.
-
-Use `localhost`, not the machine's name: browsers only allow the microphone on `localhost` or HTTPS. To open it from your laptop while it runs on the server, forward the ports over SSH (`ssh -L 8090:localhost:8090 -L 7880:localhost:7880 <server>`).
-
-Run `python -m agent.check` first if something does not answer. It says which service is down.
+5. **Website**: `python -m demo.server`, then open **http://localhost:8090**.
 
 ## While the GPU is unavailable
 

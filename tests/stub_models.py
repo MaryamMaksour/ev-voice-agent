@@ -19,8 +19,18 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from loadtest.script import CALLER_LINES
 from tests.fake_openai import _chunk
+
+# what the fake caller says, turn by turn (a typical qualified lead)
+CALLER_LINES = [
+    "Yes, speaking.",
+    "Yes, I'm still interested.",
+    "My budget is around eight hundred thousand dollars.",
+    "I prefer the Marina area.",
+    "A two bedroom apartment.",
+    "Within the next three months.",
+    "Great, thank you. Bye.",
+]
 
 app = FastAPI()
 _lines = itertools.cycle(CALLER_LINES)

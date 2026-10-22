@@ -6,7 +6,7 @@
 #   docker compose -f services/docker-compose.yml --env-file .env logs -f vllm   # first start downloads the model
 #   docker compose -f services/docker-compose.yml exec agent python -m agent.check   # every service OK?
 #
-# Then, from a laptop on the same network:  python -m agent.talk --lead L003
+# Then open the demo website (see demo/README.md).
 # Deploys after that are automatic (GitHub Actions -> deploy/deploy.sh), see README "CI/CD".
 #
 # Host networking keeps WebRTC simple and lets services reach each other on localhost.
@@ -193,6 +193,28 @@ services:
       tts: {condition: service_started}
       livekit: {condition: service_started}
       redis: {condition: service_healthy}
+    restart: unless-stopped
+
+  # The demo website (demo/README.md): http://localhost:8090 on the server, reached from a laptop with
+  #   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 <user>@<server>
+  # Same image as the agent. It listens on the server's own 127.0.0.1 only and uses the agent's demo CRM.
+  # To let a demo call change the prompt, voice and speech server, put DEMO_MODE=1 in .env (the agent reads it).
+  demo:
+    <<: *logs
+    image: ev-voice-agent:${GIT_SHA:-latest}
+    network_mode: host
+    env_file: ../.env
+    environment:
+      LIVEKIT_URL: ws://127.0.0.1:7880
+      STT_BASE_URL: http://127.0.0.1:8001/v1
+      TTS_BASE_URL: http://127.0.0.1:8880/v1
+      CALLS_DIR: /app/data/calls
+      CRM_SQLITE_PATH: data/crm.db
+    volumes:
+      - ../data:/app/data
+    command: ["python", "-m", "demo.server"]
+    depends_on:
+      livekit: {condition: service_started}
     restart: unless-stopped
 
 volumes:
