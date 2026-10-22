@@ -19,11 +19,16 @@ The text-to-speech engine (Kokoro) is one engine, so only its voice can be chose
 
 The website starts by itself with the rest of the stack (the `demo` service in `services/docker-compose.yml`). You only need to:
 
-1. Put `DEMO_MODE=1` in the server's `.env`. This lets the agent accept the prompt, voice and speech server chosen on the page. Remove it again before real customer calls.
-2. Deploy: `DEPLOY_DIR=$(pwd) bash deploy/deploy.sh <commit>`.
-3. On your laptop (on the VPN), open the tunnel and keep it open:
+1. Put these two lines in the server's `.env`:
    ```
-   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 <user>@<server>
+   DEMO_MODE=1
+   DEMO_TUNNEL=1
+   ```
+   `DEMO_MODE=1` lets the agent accept the prompt, voice and speech server chosen on the page. `DEMO_TUNNEL=1` makes LiveKit advertise `127.0.0.1`, so the call audio can travel through the SSH tunnel. **Remove both before real customer calls** (with the tunnel on, phones cannot connect).
+2. Deploy: `DEPLOY_DIR=$(pwd) bash deploy/deploy.sh <commit>`.
+3. On your laptop (on the VPN), open the tunnel with all three ports and keep it open:
+   ```
+   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 -L 7881:localhost:7881 <user>@<server>
    ```
 4. Open **http://localhost:8090** in your browser, pick a lead, and press Start call.
 
