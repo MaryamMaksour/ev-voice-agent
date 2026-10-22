@@ -162,7 +162,7 @@ def call_result(calls_dir: str, room: str) -> dict:
 class CallRequest(BaseModel):
     lead_id: str = Field(pattern=r"^[A-Za-z0-9]{1,20}$")
     prompt: str | None = None
-    tts_voice: str | None = Field(default=None, pattern=r"^[a-z]{2}_[a-z0-9]{2,20}$")
+    tts_voice: str | None = Field(default=None, max_length=60)
     stt_id: str | None = Field(default=None, max_length=40)
 
 
@@ -213,10 +213,12 @@ def create_app(config: DemoConfig, *, livekit=None, crm: SQLiteCRM | None = None
         if names is None:
             data = await asyncio.to_thread(_get_json, _root(settings.tts_base_url) + "/v1/audio/voices")
             names = data.get("voices") if isinstance(data, dict) else None
-        names = [v for v in (names or options().get("voices", [])) if isinstance(v, str) and re.match(r"^[a-z]{2}_\w+$", v)]
-        # English voices only (the product is English only)
-        names = [v for v in names if v.split("_", 1)[0] in FEMALE + MALE]
-        return [_voice_info(v) for v in names]
+        def english(candidates) -> list:
+            # English voices only (the product is English only)
+            return [v for v in (candidates or []) if isinstance(v, str) and re.match(r"^[a-z]{2}_\w+$", v)
+                    and v.split("_", 1)[0] in FEMALE + MALE]
+
+        return [_voice_info(v) for v in (english(names) or english(options().get("voices")))]
 
     @app.get("/")
     async def index():
@@ -272,7 +274,7 @@ def create_app(config: DemoConfig, *, livekit=None, crm: SQLiteCRM | None = None
             if error:
                 raise HTTPException(400, error)
             meta["prompt"] = prompt
-        if body.tts_voice:
+        if body.tts_voice and body.tts_voice.strip():
             known = {v["id"] for v in await voice_list()}
             if body.tts_voice not in known:
                 raise HTTPException(400, f"Unknown voice {body.tts_voice}")

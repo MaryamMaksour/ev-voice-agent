@@ -11,7 +11,12 @@
     const res = await fetch(path, body === undefined ? { headers: { Accept: "application/json" } }
       : { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Request failed (${res.status})`);
+    if (!res.ok) {
+      const d = data.detail;
+      const text = typeof d === "string" ? d
+        : Array.isArray(d) ? d.map((x) => `${(x.loc || []).slice(1).join(".") || "request"}: ${x.msg}`).join("; ") : "";
+      throw new Error(text || `Request failed (${res.status})`);
+    }
     return data;
   }
   const showError = (msg) => { const e = $("#error"); e.hidden = !msg; e.textContent = msg || ""; };
@@ -112,7 +117,7 @@
     $("#live").textContent = "Starting the call…"; setStatus("Connecting…", "warn");
     let call;
     try {
-      call = await api("/api/call", { lead_id: $("#lead").value, prompt: $("#prompt").value, tts_voice: $("#voice").value, stt_id: $("#stt").value });
+      call = await api("/api/call", { lead_id: $("#lead").value, prompt: $("#prompt").value, tts_voice: $("#voice").value || null, stt_id: $("#stt").value || null });
     } catch (e) { showError(e.message); lockSetup(false); setStatus("Ready", "good"); $("#live").textContent = "The call did not start."; return; }
     state.call = call; state.roomName = call.room;
     const room = new LK.Room({ audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true } });

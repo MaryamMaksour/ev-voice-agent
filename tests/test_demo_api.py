@@ -165,3 +165,18 @@ def test_static_whitelist_and_headers(env):
     assert "script-src 'self' https://cdn.jsdelivr.net" in resp.headers["content-security-policy"]
     assert "ws://localhost:7880" in resp.headers["content-security-policy"]
     assert resp.headers["permissions-policy"] == "microphone=(self)"
+
+
+def test_empty_voice_is_not_an_error(env):
+    client, lk, *_ = env
+    resp = client.post("/api/call", json={"lead_id": "L003", "tts_voice": "", "stt_id": None})
+    assert resp.status_code == 200 and "tts_voice" not in lk.rooms[resp.json()["room"]]
+
+
+def test_unexpected_voice_list_falls_back_to_the_built_in_list(env, tmp_path):
+    _client, lk, calls, config = env
+    # the speech server answered, but not with plain voice names (e.g. a list of objects)
+    app = server.create_app(config, livekit=lk, crm=SQLiteCRM(config.crm_path), probe=lambda url: True,
+                            voices=lambda: [{"name": "af_heart"}, {"name": "am_adam"}])
+    cfg = TestClient(app).get("/api/config").json()
+    assert [v["id"] for v in cfg["voices"]] == ["af_heart", "am_adam"]  # from options.json
