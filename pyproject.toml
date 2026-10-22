@@ -14,8 +14,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "fastapi>=0.110", "uvicorn>=0.30", "python-multipart>=0.0.9"]
-# the demo website (python -m demo.server)
-demo = ["fastapi>=0.110", "uvicorn>=0.30", "livekit-api>=1.0"]
 # run the speech-to-text server natively (no Docker): Parakeet on CPU
 stt = ["sherpa-onnx>=1.12", "numpy", "fastapi>=0.110", "uvicorn[standard]>=0.30", "python-multipart>=0.0.9"]
 stt-whisper = ["faster-whisper>=1.1", "fastapi>=0.110", "uvicorn[standard]>=0.30", "python-multipart>=0.0.9"]
@@ -25,7 +23,4 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.setuptools]
-packages = ["agent", "crm", "evals", "demo"]
-
-[tool.setuptools.package-data]
-demo = ["options.json", "static/*"]
+packages = ["agent", "crm", "evals"]

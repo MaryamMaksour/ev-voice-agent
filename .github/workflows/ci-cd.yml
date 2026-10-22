@@ -36,9 +36,9 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
-        run: pip install -e ".[dev,demo]"
+        run: pip install -e ".[dev]"
       - name: Byte-compile everything
-        run: python -m compileall -q agent crm evals demo services tests
+        run: python -m compileall -q agent crm evals services tests
       - name: Unit and wiring tests (fake LLM, no GPU)
         run: pytest -q --junitxml=test-results.xml
       - uses: actions/upload-artifact@v4

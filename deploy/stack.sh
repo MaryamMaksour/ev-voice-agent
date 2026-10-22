@@ -14,10 +14,9 @@ _env_value() {
 
 # Sets COMPOSE to the docker compose command for this .env. Run it from the repo folder.
 stack_compose() {
-  local llm gpu tunnel
+  local llm gpu
   llm=$(_env_value SERVER_LLM)
   gpu=$(_env_value SERVER_GPU)
-  tunnel=$(_env_value DEMO_TUNNEL)
   COMPOSE=(docker compose -f services/docker-compose.yml)
   # SERVER_LLM=ollama: the server's own Ollama instead of vLLM (services/docker-compose.ollama.yml)
   case "${llm:-vllm}" in
@@ -34,12 +33,6 @@ stack_compose() {
       COMPOSE+=(-f services/docker-compose.cpu.yml); echo "==> no GPU: STT and TTS on the CPU (slow, for tests)" >&2 ;;
     1) ;;
     *) echo "SERVER_GPU in .env must be 1 or 0, not '$gpu'" >&2; return 1 ;;
-  esac
-  # DEMO_TUNNEL=1: the demo website's call audio goes through an SSH tunnel (services/docker-compose.demo-tunnel.yml)
-  case "${tunnel:-0}" in
-    1) COMPOSE+=(-f services/docker-compose.demo-tunnel.yml); echo "==> demo tunnel: LiveKit advertises 127.0.0.1 (callers must use the SSH tunnel)" >&2 ;;
-    0) ;;
-    *) echo "DEMO_TUNNEL in .env must be 1 or 0, not '$tunnel'" >&2; return 1 ;;
   esac
   COMPOSE+=(--env-file .env)
 }

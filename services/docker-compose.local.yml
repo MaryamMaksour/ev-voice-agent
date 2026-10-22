@@ -6,7 +6,6 @@
 # Or point LLM_BASE_URL at the vLLM server instead; nothing else changes.
 #   docker compose -f services/docker-compose.local.yml --env-file .env up -d
 #   python -m agent.main dev            # the agent, on the laptop
-#   python -m demo.server               # the demo website: call it by voice from the browser
 # To test call recording on the laptop too: set LIVEKIT_NODE_IP to the laptop's IP and RECORDING_ENABLED=1
 # in .env, and add --profile recording (starts LiveKit Egress; recordings land in data/recordings/).
 # Production is everything on the GPU server: services/docker-compose.yml.

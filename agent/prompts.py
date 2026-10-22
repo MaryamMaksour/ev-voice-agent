@@ -55,15 +55,13 @@ follow up with exact details.
 """
 
 
-def build_system_prompt(lead: Lead, *, company: str, agent_name: str, tz: str, now: datetime,
-                        template: str | None = None) -> str:
-    """The prompt for one call. `template` replaces SYSTEM_PROMPT (the demo website's edited prompt)."""
+def build_system_prompt(lead: Lead, *, company: str, agent_name: str, tz: str, now: datetime) -> str:
     def known(value) -> str:
         if value is None:
             return "unknown"
         return getattr(value, "value", value)
 
-    return (template or SYSTEM_PROMPT).format(
+    return SYSTEM_PROMPT.format(
         agent_name=agent_name,
         company=company,
         now=now.strftime("%A %Y-%m-%d %H:%M"),
@@ -87,9 +85,9 @@ def greeting_text(lead: Lead, *, company: str, agent_name: str, recorded: bool =
     return f"Hi, this is {agent_name} from {company}.{recorded_note} Am I talking to {first}?"
 
 
-def prompt_version(template: str | None = None) -> str:
+def prompt_version() -> str:
     """Short hash of the prompt templates: changes whenever the wording changes."""
     import inspect
 
-    text = (template or SYSTEM_PROMPT) + inspect.getsource(greeting_text)
+    text = SYSTEM_PROMPT + inspect.getsource(greeting_text)
     return hashlib.sha1(text.encode()).hexdigest()[:10]
