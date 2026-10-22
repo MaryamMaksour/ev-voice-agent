@@ -7,6 +7,7 @@ COPY agent agent
 COPY crm crm
 COPY evals evals
 COPY loadtest loadtest
+COPY demo demo
 RUN pip install --no-cache-dir .
 # bake VAD + turn-detector weights into the image
 RUN python -m agent.main download-files
