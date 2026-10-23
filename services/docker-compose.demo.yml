@@ -17,6 +17,7 @@ services:
   # Same image as the agent; listens on the server's own 127.0.0.1:8090 and uses the agent's demo CRM.
   demo:
     image: ev-voice-agent:${GIT_SHA:-latest}
+    pull_policy: never   # built by the agent service in the same deploy; not on any registry
     network_mode: host
     env_file: ../.env
     environment:
