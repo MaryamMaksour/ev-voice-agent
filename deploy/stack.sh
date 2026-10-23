@@ -37,7 +37,7 @@ stack_compose() {
   esac
   # DEMO=1: the demo website, reached through an SSH tunnel (services/docker-compose.demo.yml)
   case "${demo:-0}" in
-    1) COMPOSE+=(-f services/docker-compose.demo.yml); echo "==> demo website on (LiveKit advertises 127.0.0.1: use the SSH tunnel, phones cannot connect)" >&2 ;;
+    1) COMPOSE+=(-f services/docker-compose.demo.yml); echo "==> demo website on (open the SSH tunnel to 8090 and 7880)" >&2 ;;
     0) ;;
     *) echo "DEMO in .env must be 1 or 0, not '$demo'" >&2; return 1 ;;
   esac
