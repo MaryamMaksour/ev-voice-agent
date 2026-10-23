@@ -143,13 +143,12 @@ It uses the demo CRM only (it refuses to start with Zoho) and has no login: it l
 
 On the company server:
 
-1. In the server's `.env` add `DEMO=1` and make sure `CRM_BACKEND=sqlite`. The demo does not change LiveKit, so phone calls keep working.
+1. In the server's `.env` add `DEMO=1` and make sure `CRM_BACKEND=sqlite`. **Remove `DEMO=1` before real phone calls**: while it is on, LiveKit advertises `127.0.0.1` so the call audio can travel through the SSH tunnel, and phones cannot connect.
 2. Deploy as usual (`DEPLOY_DIR=$(pwd) bash deploy/deploy.sh <commit>`). First time only, load the leads: `bash deploy/stack.sh exec agent python -m crm.sqlite_adapter --seed`.
 3. On your laptop (on the VPN) open the tunnel and keep it open:
    ```
-   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 <user>@<server>
+   ssh -L 8090:localhost:8090 -L 7880:localhost:7880 -L 7881:localhost:7881 <user>@<server>
    ```
-   The tunnel carries the page only. The call audio goes straight from your browser to the server, so ports 7881/tcp and 7882/udp must be reachable from your laptop.
 4. Open **http://localhost:8090** (use `localhost`: browsers only allow the microphone there), pick a lead and press **Start call**. Use headphones.
 
 If the page does not load: `bash deploy/stack.sh logs --tail 50 demo`. If you connect but nobody answers, the agent is not running: `bash deploy/stack.sh logs --tail 50 agent`.

@@ -186,7 +186,7 @@ A single page for showing the agent: talk to it from the browser and watch the l
 | FR-94 | **Reset lead** shall put the picked lead back to its starting values so the demo can be repeated. | Done |
 | FR-95 | The website shall use the demo SQLite CRM only, shall refuse to start with `CRM_BACKEND` set to anything else, and shall listen on `127.0.0.1` only. | Done |
 | FR-96 | The website shall start the call by creating the room `lead-<ID>-<time>` and giving the browser a token; the agent shall need no demo-specific code. | Built, not yet tested on the server |
-| FR-97 | The website shall run on the company server and be reached through the SSH tunnel at `http://localhost:8090`. The call audio shall go directly from the browser to the server's LAN address, not through the tunnel. | Built, not yet tested on the server |
+| FR-97 | The website shall run on the company server and be reached through the SSH tunnel at `http://localhost:8090`. | Built, not yet tested on the server |
 
 ---
 
